@@ -22,6 +22,8 @@
 
 CertMate 不把管理员密码写入数据库，不把证书私钥正文存入 SQLite。DNS Secret 使用应用主密钥进行 AES-GCM 加密或仅保存环境变量引用。日志、任务输出和审计记录不得包含密码、Token、Cookie、DNS Secret 或私钥；发生疑似泄漏时应立即轮换相关 Secret 和证书。
 
+DNS 凭据页面的“测试”是本地安全校验，只验证密文解密或环境变量引用，不向第三方 DNS Provider 发起在线请求，也不会修改 DNS 记录。ACME Directory URL 只接受预设值或不含凭据/片段的 HTTPS 地址。
+
 ## 安全验证
 
 ```bash

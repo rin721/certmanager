@@ -40,6 +40,7 @@ type RenewRequest struct {
 	KeyType       string
 	Force         bool
 	DNSVariables  map[string]string
+	CADirectory   string
 }
 
 type RevokeRequest struct {
@@ -116,6 +117,13 @@ func (c *CLI) renewArguments(request RenewRequest) ([]string, error) {
 		return nil, err
 	}
 	arguments := append(c.baseArguments(), "--renew", "-d", request.PrimaryDomain)
+	if request.CADirectory != "" {
+		server, err := validateCA(request.CADirectory)
+		if err != nil {
+			return nil, err
+		}
+		arguments = append(arguments, "--server", server)
+	}
 	if isECC(request.KeyType) {
 		arguments = append(arguments, "--ecc")
 	} else if request.KeyType != "rsa-2048" && request.KeyType != "rsa-3072" {

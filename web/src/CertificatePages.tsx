@@ -52,7 +52,8 @@ import {
 	deleteCertificate,
   downloadCertificateArchive,
   getCertificate,
-  getCertificateFile,
+	getCertificateFile,
+  issueCertificate,
   listCertificateFiles,
   listCertificates,
   listDNSCredentials,
@@ -64,6 +65,7 @@ import {
   updateCertificate,
 } from './api'
 import { CertificateAudits, CertificateJobs, JobTable } from './OperationsPages'
+import { isSafeCADirectoryURL } from './validation'
 
 const formSchema = z.object({
   mode: z.enum(['self_signed', 'acme']),
@@ -83,7 +85,11 @@ const formSchema = z.object({
 }).superRefine((value, context) => {
   if (value.mode === 'acme') {
     if (!value.acme_email.includes('@')) context.addIssue({ code: 'custom', path: ['acme_email'], message: '请输入有效 ACME 邮箱' })
-    if (!value.ca_directory_url.trim()) context.addIssue({ code: 'custom', path: ['ca_directory_url'], message: '请选择 ACME CA' })
+    if (!value.ca_directory_url.trim()) {
+      context.addIssue({ code: 'custom', path: ['ca_directory_url'], message: '请选择或填写 ACME Directory URL' })
+    } else if (!['letsencrypt', 'letsencrypt_test', 'zerossl'].includes(value.ca_directory_url) && !isSafeCADirectoryURL(value.ca_directory_url)) {
+      context.addIssue({ code: 'custom', path: ['ca_directory_url'], message: '自定义地址必须是 HTTPS URL，且不能包含用户名、密码或片段' })
+    }
     if (value.challenge_type === 'dns-01' && !value.dns_credential_id) context.addIssue({ code: 'custom', path: ['dns_credential_id'], message: 'DNS-01 必须选择凭据' })
   } else if (value.renew_before_days >= value.valid_days) {
     context.addIssue({ code: 'custom', path: ['renew_before_days'], message: '必须小于有效天数' })
@@ -137,8 +143,8 @@ export function CertificateListPage() {
       </Stack>
       {query.isError && <Alert severity="error">读取证书列表失败。</Alert>}
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}><TextField label="搜索名称或域名" value={search} onChange={(event) => setSearch(event.target.value)} /><TextField select label="状态" value={status} onChange={(event) => setStatus(event.target.value)} sx={{ minWidth: 150 }}><MenuItem value="">全部</MenuItem>{['pending', 'issuing', 'active', 'expiring', 'expired', 'renewing', 'failed', 'disabled', 'revoked'].map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}</TextField><TextField select label="模式" value={modeFilter} onChange={(event) => setModeFilter(event.target.value)} sx={{ minWidth: 170 }}><MenuItem value="">全部</MenuItem><MenuItem value="acme">公共 CA</MenuItem><MenuItem value="self_signed">本地自签名</MenuItem></TextField><TextField select label="到期时间排序" value={expiryOrder} onChange={(event) => setExpiryOrder(event.target.value as 'asc' | 'desc')} sx={{ minWidth: 180 }}><MenuItem value="asc">最早到期优先</MenuItem><MenuItem value="desc">最晚到期优先</MenuItem></TextField></Stack>
-      <TableContainer component={Paper} variant="outlined">
-        <Table>
+       <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}>
+         <Table sx={{ minWidth: 960 }}>
           <TableHead><TableRow><TableCell>名称</TableCell><TableCell>主域名</TableCell><TableCell>SAN</TableCell><TableCell>模式</TableCell><TableCell>签发者 / 密钥</TableCell><TableCell>状态</TableCell><TableCell>到期 / 剩余</TableCell><TableCell>自动更新 / 最近续签</TableCell></TableRow></TableHead>
           <TableBody>
             {values.map((item) => (
@@ -179,6 +185,7 @@ export function CreateCertificatePage() {
   })
   const mode = useWatch({ control: form.control, name: 'mode' })
   const challengeType = useWatch({ control: form.control, name: 'challenge_type' })
+  const caDirectoryURL = useWatch({ control: form.control, name: 'ca_directory_url' })
   const mutation = useMutation({
     mutationFn: (value: FormValue) => {
       const common = {
@@ -219,7 +226,7 @@ export function CreateCertificatePage() {
       <Card variant="outlined"><CardContent><Stack spacing={2.5}>
 		{activeStep === 0 && <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}><Button type="button" size="large" variant={mode === 'acme' ? 'contained' : 'outlined'} onClick={() => form.setValue('mode', 'acme')}>公共 CA 证书</Button><Button type="button" size="large" variant={mode === 'self_signed' ? 'contained' : 'outlined'} onClick={() => form.setValue('mode', 'self_signed')}>本地自签名证书</Button></Stack>}
         {activeStep === 1 && <><TextField label="证书名称" error={Boolean(form.formState.errors.name)} helperText={form.formState.errors.name?.message} {...form.register('name')} /><TextField label="主域名" placeholder="example.com" error={Boolean(form.formState.errors.primary_domain)} helperText={form.formState.errors.primary_domain?.message} {...form.register('primary_domain')} /><TextField label="SAN 域名" placeholder={'www.example.com\n*.example.com'} multiline minRows={3} helperText="每行一个，或使用逗号分隔；主域名会自动包含" {...form.register('sans')} /></>}
-        {activeStep === 2 && <><TextField select label="密钥类型" {...form.register('key_type')}><MenuItem value="ec-256">ECDSA P-256（推荐）</MenuItem><MenuItem value="rsa-2048">RSA 2048</MenuItem><MenuItem value="rsa-3072">RSA 3072</MenuItem></TextField>{mode === 'self_signed' ? <TextField label="有效天数" type="number" error={Boolean(form.formState.errors.valid_days)} helperText={form.formState.errors.valid_days?.message} {...form.register('valid_days', { valueAsNumber: true })} /> : <><TextField select label="ACME CA" {...form.register('ca_directory_url')}><MenuItem value="letsencrypt">Let’s Encrypt 正式环境</MenuItem><MenuItem value="letsencrypt_test">Let’s Encrypt Staging</MenuItem></TextField><TextField label="ACME 邮箱" type="email" error={Boolean(form.formState.errors.acme_email)} helperText={form.formState.errors.acme_email?.message} {...form.register('acme_email')} /><TextField select label="验证方式" {...form.register('challenge_type')}><MenuItem value="dns-01">DNS-01（推荐）</MenuItem><MenuItem value="http-01">HTTP-01</MenuItem></TextField>{challengeType === 'dns-01' && <TextField select label="DNS 凭据" error={Boolean(form.formState.errors.dns_credential_id)} helperText={form.formState.errors.dns_credential_id?.message || (credentials.data?.length ? '' : '请先在 DNS 凭据页面创建凭据')} {...form.register('dns_credential_id')}>{credentials.data?.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</TextField>}</>}</>}
+        {activeStep === 2 && <><TextField select label="密钥类型" {...form.register('key_type')}><MenuItem value="ec-256">ECDSA P-256（推荐）</MenuItem><MenuItem value="rsa-2048">RSA 2048</MenuItem><MenuItem value="rsa-3072">RSA 3072</MenuItem></TextField>{mode === 'self_signed' ? <TextField label="有效天数" type="number" error={Boolean(form.formState.errors.valid_days)} helperText={form.formState.errors.valid_days?.message} {...form.register('valid_days', { valueAsNumber: true })} /> : <><TextField select label="ACME CA" value={['letsencrypt', 'letsencrypt_test', 'zerossl'].includes(caDirectoryURL) ? caDirectoryURL : (caDirectoryURL ? 'custom' : '')} onChange={(event) => form.setValue('ca_directory_url', event.target.value === 'custom' ? '' : event.target.value, { shouldValidate: true })} error={Boolean(form.formState.errors.ca_directory_url)} helperText={form.formState.errors.ca_directory_url?.message}><MenuItem value="">请选择</MenuItem><MenuItem value="letsencrypt">Let’s Encrypt 正式环境</MenuItem><MenuItem value="letsencrypt_test">Let’s Encrypt Staging</MenuItem><MenuItem value="zerossl">ZeroSSL</MenuItem><MenuItem value="custom">自定义 Directory URL</MenuItem></TextField>{(!['letsencrypt', 'letsencrypt_test', 'zerossl'].includes(caDirectoryURL)) && <TextField label="自定义 ACME Directory URL" placeholder="https://acme.example.com/directory" error={Boolean(form.formState.errors.ca_directory_url)} helperText={form.formState.errors.ca_directory_url?.message || '仅支持 HTTPS；不会保存或发送 URL 中的凭据'} {...form.register('ca_directory_url')} />}<TextField label="ACME 邮箱" type="email" error={Boolean(form.formState.errors.acme_email)} helperText={form.formState.errors.acme_email?.message} {...form.register('acme_email')} /><TextField select label="验证方式" {...form.register('challenge_type')}><MenuItem value="dns-01">DNS-01（推荐）</MenuItem><MenuItem value="http-01">HTTP-01</MenuItem></TextField>{challengeType === 'dns-01' && <TextField select label="DNS 凭据" error={Boolean(form.formState.errors.dns_credential_id)} helperText={form.formState.errors.dns_credential_id?.message || (credentials.data?.length ? '' : '请先在 DNS 凭据页面创建凭据')} {...form.register('dns_credential_id')}>{credentials.data?.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}</TextField>}</>}</>}
         {activeStep === 3 && <><TextField label="安全输出目录名" placeholder="留空时根据主域名生成" error={Boolean(form.formState.errors.output_directory)} helperText={form.formState.errors.output_directory?.message} {...form.register('output_directory')} /><TextField label="提前续签/重新生成天数" type="number" error={Boolean(form.formState.errors.renew_before_days)} helperText={form.formState.errors.renew_before_days?.message} {...form.register('renew_before_days', { valueAsNumber: true })} /><FormControlLabel control={<Checkbox defaultChecked {...form.register('auto_renew_enabled')} />} label="自动续签或重新生成" /><FormControlLabel control={<Checkbox defaultChecked {...form.register('create_renewed_marker')} />} label="更新后创建 .renewed 标记文件" /></>}
         {activeStep === 4 && <Stack spacing={1}><Typography><b>类型：</b>{mode === 'acme' ? '公共 CA 证书' : '本地自签名证书'}</Typography><Typography><b>名称：</b>{form.getValues('name')}</Typography><Typography><b>主域名：</b>{form.getValues('primary_domain')}</Typography><Typography><b>密钥：</b>{form.getValues('key_type')}</Typography><Typography><b>输出：</b>/certs/{form.getValues('output_directory') || '（根据域名生成）'}</Typography>{mode === 'acme' && <Typography color="text.secondary">DNS 敏感值不会在确认页显示。</Typography>}</Stack>}
       </Stack></CardContent></Card>
@@ -250,6 +257,10 @@ export function CertificateDetailPage() {
     mutationFn: async () => { await reauthenticate(forcePassword); return renewCertificate(id, true) },
     onSuccess: (value) => { setForcePassword(''); setForceOpen(false); queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
   })
+	const issue = useMutation({
+	  mutationFn: () => issueCertificate(id),
+	  onSuccess: (value) => { queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
+	})
 	const revoke = useMutation({
 	  mutationFn: () => revokeCertificate(id, revokePassword),
 	  onSuccess: (value) => { setRevokePassword(''); setRevokeOpen(false); queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
@@ -261,10 +272,11 @@ export function CertificateDetailPage() {
   if (query.isPending) return <Typography>正在加载证书…</Typography>
   if (query.isError) return <Alert severity="error">证书不存在或读取失败。</Alert>
   const certificate = query.data
+	const canIssue = ['pending', 'failed', 'active', 'expiring', 'expired'].includes(certificate.status)
   return (
     <Stack spacing={3}>
-      <Stack direction={{ xs: 'column', md: 'row' }} sx={{ justifyContent: 'space-between', gap: 2 }}><Box><Typography variant="h4">{certificate.name}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1 }}><StatusChip status={certificate.status} /><Chip label={certificate.mode === 'acme' ? '公共 CA 证书' : '本地自签名证书'} variant="outlined" /></Stack></Box><Stack direction="row" spacing={1}><Button startIcon={<AutorenewOutlinedIcon />} variant="outlined" disabled={renew.isPending} onClick={() => renew.mutate()}>手动续签</Button><Button color="warning" disabled={forceRenew.isPending} onClick={() => setForceOpen(true)}>强制续签</Button>{certificate.mode === 'acme' && <Button color="warning" onClick={() => setRevokeOpen(true)}>撤销</Button>}<Button color="error" onClick={() => setDeleteOpen(true)}>删除</Button></Stack></Stack>
-      {(renew.isError || forceRenew.isError || revoke.isError || remove.isError) && <Alert severity="error">操作失败，请检查确认信息并查看任务日志。</Alert>}
+      <Stack direction={{ xs: 'column', md: 'row' }} sx={{ justifyContent: 'space-between', gap: 2 }}><Box><Typography variant="h4">{certificate.name}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1 }}><StatusChip status={certificate.status} /><Chip label={certificate.mode === 'acme' ? '公共 CA 证书' : '本地自签名证书'} variant="outlined" /></Stack></Box><Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}><Button startIcon={<AutorenewOutlinedIcon />} variant="outlined" disabled={renew.isPending} onClick={() => renew.mutate()}>手动续签</Button><Button variant="outlined" disabled={!canIssue || issue.isPending} onClick={() => issue.mutate()}>{issue.isPending ? '正在签发…' : certificate.status === 'failed' ? '重试签发' : '重新签发'}</Button><Button color="warning" disabled={forceRenew.isPending} onClick={() => setForceOpen(true)}>强制续签</Button>{certificate.mode === 'acme' && <Button color="warning" onClick={() => setRevokeOpen(true)}>撤销</Button>}<Button color="error" onClick={() => setDeleteOpen(true)}>删除</Button></Stack></Stack>
+      {(renew.isError || forceRenew.isError || issue.isError || revoke.isError || remove.isError) && <Alert severity="error">操作失败，请检查确认信息并查看任务日志。</Alert>}
       <Paper variant="outlined"><Tabs value={tab} onChange={(_, value: number) => setTab(value)} variant="scrollable"><Tab label="概览" /><Tab label="域名" /><Tab label="证书文件" /><Tab label="自动续签" /><Tab label="任务历史" /><Tab label="审计记录" /></Tabs></Paper>
       {tab === 0 && <Overview certificate={certificate} />}
       {tab === 1 && <Card variant="outlined"><CardContent><Stack spacing={1}>{certificate.domains.map((domain) => <Typography key={domain} component="code">{domain}</Typography>)}</Stack></CardContent></Card>}
@@ -346,7 +358,7 @@ function CertificateFiles({ certificate }: { certificate: Certificate }) {
       {error && <Alert severity="error">{error}</Alert>}
       <Alert severity="info">容器内目录为 /certs/{certificate.output_directory}；宿主机路径为 compose 中 CERTS_HOST_DIR 对应目录下的 {certificate.output_directory}。其他容器应只读挂载该宿主机目录。</Alert>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}><Button variant="outlined" startIcon={<DownloadOutlinedIcon />} disabled={archive.isPending} onClick={() => archive.mutate(false)}>下载 ZIP（不含私钥）</Button><Button color="warning" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => setArchivePasswordOpen(true)}>下载 ZIP（含私钥）</Button></Stack>
-      <TableContainer component={Paper} variant="outlined"><Table><TableHead><TableRow><TableCell>文件</TableCell><TableCell>容器内路径</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
+       <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}><Table sx={{ minWidth: 640 }}><TableHead><TableRow><TableCell>文件</TableCell><TableCell>容器内路径</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
         {files.data?.map((file) => <TableRow key={file.type}><TableCell>{file.filename}{file.private && <Chip label="高风险" color="warning" size="small" sx={{ ml: 1 }} />}</TableCell><TableCell component="code">{file.container_path}</TableCell><TableCell align="right"><Button startIcon={<VisibilityOutlinedIcon />} onClick={() => file.private ? setPasswordOpen(true) : load.mutate(file)}>查看</Button><Button component="a" href={certificateDownloadURL(certificate.id, file.type)} startIcon={<DownloadOutlinedIcon />} disabled={file.private && selected?.type !== 'private-key'}>下载</Button></TableCell></TableRow>)}
       </TableBody></Table></TableContainer>
       <Dialog open={Boolean(selected && content)} onClose={closeViewer} maxWidth="md" fullWidth><DialogTitle>{selected?.filename}</DialogTitle><DialogContent><Alert severity={selected?.private ? 'warning' : 'info'} sx={{ mb: 2 }}>{selected?.private ? '私钥属于高敏感信息。关闭窗口或离开页面后将立即从前端内存清除。' : '证书内容可以安全复制给需要使用它的服务。'}</Alert><Box component="pre" sx={{ bgcolor: 'grey.950', color: 'grey.100', p: 2, borderRadius: 1, maxHeight: '50vh', overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{content}</Box></DialogContent><DialogActions><Button startIcon={<ContentCopyOutlinedIcon />} onClick={async () => { await copyText(content); if (selected?.private) await auditPrivateKeyCopy(certificate.id) }}>复制</Button><Button onClick={closeViewer}>关闭</Button></DialogActions></Dialog>

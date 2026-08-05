@@ -28,6 +28,10 @@ export type Certificate = {
   auto_renew_enabled: boolean
   renew_before_days: number
   self_signed_valid_days?: number
+  challenge_type?: 'dns-01' | 'http-01'
+  dns_credential_id?: string
+  ca_directory_url?: string
+  acme_email?: string
   create_renewed_marker: boolean
   created_at: string
   updated_at: string
@@ -361,6 +365,10 @@ export async function runRenewalNow(): Promise<void> {
 
 export async function renewCertificate(id: string, force = false): Promise<Certificate> {
   return write<Certificate>(`/api/v1/certificates/${encodeURIComponent(id)}/${force ? 'force-renew' : 'renew'}`)
+}
+
+export async function issueCertificate(id: string): Promise<Certificate> {
+  return write<Certificate>(`/api/v1/certificates/${encodeURIComponent(id)}/issue`)
 }
 
 export async function revokeCertificate(id: string, password: string): Promise<Certificate> {

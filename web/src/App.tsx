@@ -1,5 +1,6 @@
 import HealthAndSafetyOutlinedIcon from '@mui/icons-material/HealthAndSafetyOutlined'
 import LogoutOutlinedIcon from '@mui/icons-material/LogoutOutlined'
+import MenuOutlinedIcon from '@mui/icons-material/MenuOutlined'
 import {
   Alert,
   AppBar,
@@ -9,10 +10,17 @@ import {
   Container,
   Toolbar,
   Typography,
+  Drawer,
+  IconButton,
+  List,
+  ListItemButton,
+  ListItemText,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { lazy, Suspense, useEffect } from 'react'
-import { BrowserRouter, Link as RouterLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
+import { lazy, Suspense, useEffect, useState } from 'react'
+import { BrowserRouter, Link as RouterLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { getCurrentUser, getMeta, logout } from './api'
 import { LoginPage } from './LoginPage'
 
@@ -55,7 +63,11 @@ function LoginRoute({ appName }: { appName: string }) {
 
 function AuthenticatedArea({ appName, environment }: { appName: string; environment: string }) {
   const navigate = useNavigate()
+  const location = useLocation()
   const queryClient = useQueryClient()
+  const theme = useTheme()
+  const compactNavigation = useMediaQuery(theme.breakpoints.down('md'))
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const currentUser = useQuery({ queryKey: ['current-user'], queryFn: getCurrentUser, retry: false })
   const signOut = useMutation({
     mutationFn: logout,
@@ -66,24 +78,30 @@ function AuthenticatedArea({ appName, environment }: { appName: string; environm
   })
   if (currentUser.isPending) return <FullPageProgress />
   if (!currentUser.data) return <Navigate to="/login" replace />
+	const navItems = [
+	  ['仪表盘', '/'], ['证书', '/certificates'], ['DNS 凭据', '/dns-credentials'], ['自动续签', '/renewal-settings'],
+	  ['任务', '/jobs'], ['审计', '/audit-events'], ['系统', '/system-info'],
+	] as const
+	const closeDrawer = () => setDrawerOpen(false)
 
   return (
     <>
       <AppBar position="static" color="inherit" elevation={1}>
-        <Toolbar>
+        <Toolbar sx={{ gap: 1, flexWrap: { xs: 'wrap', md: 'nowrap' }, py: { xs: 1, md: 0 } }}>
           <HealthAndSafetyOutlinedIcon color="primary" sx={{ mr: 1.5 }} />
           <Typography variant="h6" component="h1" sx={{ flexGrow: 1 }}>{appName}</Typography>
-          <Button color="inherit" component={RouterLink} to="/">仪表盘</Button>
-          <Button color="inherit" component={RouterLink} to="/certificates">证书</Button>
-          <Button color="inherit" component={RouterLink} to="/dns-credentials">DNS 凭据</Button>
-		  <Button color="inherit" component={RouterLink} to="/renewal-settings">自动续签</Button>
-		  <Button color="inherit" component={RouterLink} to="/jobs">任务</Button>
-		  <Button color="inherit" component={RouterLink} to="/audit-events">审计</Button>
-		  <Button color="inherit" component={RouterLink} to="/system-info">系统</Button>
+		  {!compactNavigation && navItems.map(([label, path]) => <Button key={path} color={location.pathname === path || (path !== '/' && location.pathname.startsWith(path)) ? 'primary' : 'inherit'} component={RouterLink} to={path}>{label}</Button>)}
           <Typography color="text.secondary" variant="body2" sx={{ mr: 2 }}>{environment}</Typography>
+		  {compactNavigation && <IconButton color="primary" aria-label="打开导航" onClick={() => setDrawerOpen(true)}><MenuOutlinedIcon /></IconButton>}
           <Button color="inherit" startIcon={<LogoutOutlinedIcon />} onClick={() => signOut.mutate()} disabled={signOut.isPending}>退出</Button>
         </Toolbar>
       </AppBar>
+	  <Drawer anchor="right" open={drawerOpen} onClose={closeDrawer}>
+		<Box sx={{ width: 260, pt: 2 }} role="presentation">
+		  <Typography variant="h6" sx={{ px: 2, pb: 1 }}>{appName}</Typography>
+		  <List>{navItems.map(([label, path]) => <ListItemButton key={path} component={RouterLink} to={path} selected={location.pathname === path || (path !== '/' && location.pathname.startsWith(path))} onClick={closeDrawer}><ListItemText primary={label} /></ListItemButton>)}</List>
+		</Box>
+	  </Drawer>
       <Container maxWidth="lg" sx={{ py: 5 }}>
         <Typography color="text.secondary" sx={{ mb: 3 }}>欢迎，{currentUser.data.username}。</Typography>
         <Routes>

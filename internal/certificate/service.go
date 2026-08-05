@@ -170,6 +170,38 @@ func (s *Service) Delete(ctx context.Context, id string, deleteFiles bool, actor
 }
 
 func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clientIP string) (Certificate, error) {
+	jobType, eventType := "renew", "certificate.renew"
+	if force {
+		jobType, eventType = "force_renew", "certificate.force_renew"
+	}
+	return s.issueExisting(ctx, id, force, jobType, eventType, actor, clientIP)
+}
+
+// Issue manually re-issues an existing certificate while preserving the
+// create-immediately contract. It is intended for failed, expired, or
+// explicitly requested refreshes and shares the same locking and publishing
+// path as renewal.
+func (s *Service) Issue(ctx context.Context, id, actor, clientIP string) (Certificate, error) {
+	value, err := s.Get(ctx, id)
+	if err != nil {
+		return Certificate{}, err
+	}
+	if !manualIssueAllowed(value.Status) {
+		return Certificate{}, errors.New("当前证书状态不允许重新签发")
+	}
+	return s.issueExisting(ctx, id, true, "issue", "certificate.issue", actor, clientIP)
+}
+
+func manualIssueAllowed(status Status) bool {
+	switch status {
+	case StatusPending, StatusFailed, StatusActive, StatusExpiring, StatusExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) issueExisting(ctx context.Context, id string, force bool, jobType, eventType, actor, clientIP string) (Certificate, error) {
 	value, err := s.Get(ctx, id)
 	if err != nil {
 		return Certificate{}, err
@@ -180,15 +212,17 @@ func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clien
 		return Certificate{}, ErrOperationRunning
 	}
 	defer lock.Unlock()
+	if jobType == "issue" {
+		if !manualIssueAllowed(value.Status) {
+			return Certificate{}, errors.New("当前证书状态不允许重新签发")
+		}
+		return s.issueExistingCertificate(ctx, value, actor, clientIP)
+	}
 	if value.Status == StatusRevoked || value.Status == StatusDisabled {
 		return Certificate{}, errors.New("当前证书状态不允许续签")
 	}
 	if err := s.store.SetCertificateStatus(ctx, id, StatusRenewing); err != nil {
 		return Certificate{}, err
-	}
-	jobType := "renew"
-	if force {
-		jobType = "force_renew"
 	}
 	job := &jobs.Run{CertificateID: id, JobType: jobType, Status: "running"}
 	if err := s.store.CreateJob(ctx, job); err != nil {
@@ -203,37 +237,43 @@ func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clien
 			PrimaryDomain: value.PrimaryDomain, Domains: value.Domains, KeyType: value.KeyType, ValidDays: value.SelfSignedValidDays,
 		})
 		if renewErr != nil {
-			return Certificate{}, s.failRenewal(ctx, value, job, exitCode(renewErr), "", renewErr, actor, clientIP)
+			return Certificate{}, s.failRenewal(ctx, value, job, exitCode(renewErr), "", renewErr, eventType, actor, clientIP)
+		}
+		if result == nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("自签名引擎未返回签发结果"), eventType, actor, clientIP)
 		}
 		certPEM, chainPEM, fullchainPEM, privateKeyPEM = result.CertificatePEM, result.CertificatePEM, result.CertificatePEM, result.PrivateKeyPEM
 		metadataIssuer, metadataSerial, metadataFingerprint, keyAlgorithm = result.Metadata.Issuer.String(), result.Metadata.SerialNumber, result.Metadata.FingerprintSHA256, result.Metadata.KeyAlgorithm
 		notBefore, notAfter, commandExit, output = result.Metadata.NotBefore, result.Metadata.NotAfter, result.ExitCode, result.OutputSummary
 	} else if value.Mode == ModeACME {
 		if s.acme == nil {
-			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("ACME 功能未启用"), actor, clientIP)
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("ACME 功能未启用"), eventType, actor, clientIP)
 		}
 		var processValues credential.ProcessValues
 		if value.ChallengeType == "dns-01" {
 			if s.credentials == nil {
-				return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("DNS 凭据服务不可用"), actor, clientIP)
+				return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("DNS 凭据服务不可用"), eventType, actor, clientIP)
 			}
 			processValues, err = s.credentials.Resolve(ctx, value.DNSCredentialID)
 			if err != nil {
-				return Certificate{}, s.failRenewal(ctx, value, job, -1, "", err, actor, clientIP)
+				return Certificate{}, s.failRenewal(ctx, value, job, -1, "", err, eventType, actor, clientIP)
 			}
 		}
 		result, renewErr := s.acme.Renew(ctx, acmesh.RenewRequest{
 			CertificateID: id, PrimaryDomain: value.PrimaryDomain, KeyType: value.KeyType,
-			Force: force, DNSVariables: processValues.Environment,
+			Force: force, DNSVariables: processValues.Environment, CADirectory: value.CADirectoryURL,
 		})
 		if renewErr != nil {
-			return Certificate{}, s.failRenewal(ctx, value, job, acmeExitCode(renewErr), "", renewErr, actor, clientIP)
+			return Certificate{}, s.failRenewal(ctx, value, job, acmeExitCode(renewErr), "", renewErr, eventType, actor, clientIP)
+		}
+		if result == nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("ACME 引擎未返回签发结果"), eventType, actor, clientIP)
 		}
 		certPEM, chainPEM, fullchainPEM, privateKeyPEM = result.CertificatePEM, result.ChainPEM, result.FullchainPEM, result.PrivateKeyPEM
 		metadataIssuer, metadataSerial, metadataFingerprint, keyAlgorithm = result.Metadata.Issuer.String(), result.Metadata.SerialNumber, result.Metadata.FingerprintSHA256, result.Metadata.KeyAlgorithm
 		notBefore, notAfter, commandExit, output = result.Metadata.NotBefore, result.Metadata.NotAfter, result.ExitCode, result.OutputSummary
 	} else {
-		return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("未知证书模式"), actor, clientIP)
+		return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("未知证书模式"), eventType, actor, clientIP)
 	}
 	metadataDocument, err := json.MarshalIndent(map[string]any{
 		"certificate_id": value.ID, "name": value.Name, "mode": value.Mode, "primary_domain": value.PrimaryDomain,
@@ -242,13 +282,13 @@ func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clien
 		"key_algorithm": keyAlgorithm, "updated_at": s.now().UTC(),
 	}, "", "  ")
 	if err != nil {
-		return Certificate{}, s.failRenewal(ctx, value, job, commandExit, output, err, actor, clientIP)
+		return Certificate{}, s.failRenewal(ctx, value, job, commandExit, output, err, eventType, actor, clientIP)
 	}
 	if _, err := s.publisher.Publish(value.OutputDirectory, certfiles.Payload{
 		CertPEM: certPEM, ChainPEM: chainPEM, FullchainPEM: fullchainPEM, PrivateKeyPEM: privateKeyPEM,
 		MetadataJSON: append(metadataDocument, '\n'), CreateMarker: value.CreateRenewedMarker,
 	}); err != nil {
-		return Certificate{}, s.failRenewal(ctx, value, job, commandExit, output, err, actor, clientIP)
+		return Certificate{}, s.failRenewal(ctx, value, job, commandExit, output, err, eventType, actor, clientIP)
 	}
 	value.Issuer, value.SerialNumber, value.FingerprintSHA256 = metadataIssuer, metadataSerial, metadataFingerprint
 	value.NotBefore, value.NotAfter = timePointer(notBefore), timePointer(notAfter)
@@ -256,12 +296,94 @@ func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clien
 		return Certificate{}, err
 	}
 	_ = s.store.FinishJob(ctx, job.ID, "succeeded", commandExit, output, "")
-	eventType := "certificate.renew"
-	if force {
-		eventType = "certificate.force_renew"
-	}
 	_ = s.audit(ctx, id, eventType, actor, clientIP, "succeeded", map[string]any{"mode": value.Mode})
 	return s.Get(ctx, id)
+}
+
+func (s *Service) issueExistingCertificate(ctx context.Context, value Certificate, actor, clientIP string) (Certificate, error) {
+	if err := s.store.SetCertificateStatus(ctx, value.ID, StatusIssuing); err != nil {
+		return Certificate{}, err
+	}
+	job := &jobs.Run{CertificateID: value.ID, JobType: "issue", Status: "running"}
+	if err := s.store.CreateJob(ctx, job); err != nil {
+		_ = s.store.MarkCertificateFailed(ctx, value.ID, "无法创建任务记录")
+		return Certificate{}, err
+	}
+	var certPEM, chainPEM, fullchainPEM, privateKeyPEM []byte
+	var metadataIssuer, metadataSerial, metadataFingerprint, keyAlgorithm, output string
+	var notBefore, notAfter time.Time
+	var commandExit int
+	if value.Mode == ModeSelfSigned {
+		if s.engine == nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("自签名功能未启用"), "certificate.issue", actor, clientIP)
+		}
+		result, issueErr := s.engine.Issue(ctx, selfsigned.Request{PrimaryDomain: value.PrimaryDomain, Domains: value.Domains, KeyType: value.KeyType, ValidDays: value.SelfSignedValidDays})
+		if issueErr != nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, exitCode(issueErr), "", issueErr, "certificate.issue", actor, clientIP)
+		}
+		if result == nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("自签名引擎未返回签发结果"), "certificate.issue", actor, clientIP)
+		}
+		certPEM, chainPEM, fullchainPEM, privateKeyPEM = result.CertificatePEM, result.CertificatePEM, result.CertificatePEM, result.PrivateKeyPEM
+		metadataIssuer, metadataSerial, metadataFingerprint, keyAlgorithm = result.Metadata.Issuer.String(), result.Metadata.SerialNumber, result.Metadata.FingerprintSHA256, result.Metadata.KeyAlgorithm
+		notBefore, notAfter, commandExit, output = result.Metadata.NotBefore, result.Metadata.NotAfter, result.ExitCode, result.OutputSummary
+	} else if value.Mode == ModeACME {
+		if s.acme == nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("ACME 功能未启用"), "certificate.issue", actor, clientIP)
+		}
+		var processValues credential.ProcessValues
+		if value.ChallengeType == "dns-01" {
+			if s.credentials == nil {
+				return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("DNS 凭据服务不可用"), "certificate.issue", actor, clientIP)
+			}
+			resolved, resolveErr := s.credentials.Resolve(ctx, value.DNSCredentialID)
+			if resolveErr != nil {
+				return Certificate{}, s.failRenewal(ctx, value, job, -1, "", resolveErr, "certificate.issue", actor, clientIP)
+			}
+			processValues = resolved
+		} else if value.ChallengeType != "http-01" {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("仅支持 dns-01 或 http-01"), "certificate.issue", actor, clientIP)
+		}
+		result, issueErr := s.acme.Issue(ctx, acmesh.IssueRequest{
+			CertificateID: value.ID, PrimaryDomain: value.PrimaryDomain, Domains: value.Domains, KeyType: value.KeyType,
+			ChallengeType: value.ChallengeType, DNSProvider: processValues.ACMEDNSCode, DNSVariables: processValues.Environment,
+			CADirectory: value.CADirectoryURL, Email: value.ACMEEmail,
+		})
+		if issueErr != nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, acmeExitCode(issueErr), "", issueErr, "certificate.issue", actor, clientIP)
+		}
+		if result == nil {
+			return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("ACME 引擎未返回签发结果"), "certificate.issue", actor, clientIP)
+		}
+		certPEM, chainPEM, fullchainPEM, privateKeyPEM = result.CertificatePEM, result.ChainPEM, result.FullchainPEM, result.PrivateKeyPEM
+		metadataIssuer, metadataSerial, metadataFingerprint, keyAlgorithm = result.Metadata.Issuer.String(), result.Metadata.SerialNumber, result.Metadata.FingerprintSHA256, result.Metadata.KeyAlgorithm
+		notBefore, notAfter, commandExit, output = result.Metadata.NotBefore, result.Metadata.NotAfter, result.ExitCode, result.OutputSummary
+	} else {
+		return Certificate{}, s.failRenewal(ctx, value, job, -1, "", errors.New("未知证书模式"), "certificate.issue", actor, clientIP)
+	}
+	metadataDocument, err := json.MarshalIndent(map[string]any{
+		"certificate_id": value.ID, "name": value.Name, "mode": value.Mode, "primary_domain": value.PrimaryDomain,
+		"domains": value.Domains, "issuer": metadataIssuer, "serial_number": metadataSerial,
+		"not_before": notBefore, "not_after": notAfter, "fingerprint_sha256": metadataFingerprint,
+		"key_algorithm": keyAlgorithm, "updated_at": s.now().UTC(),
+	}, "", "  ")
+	if err != nil {
+		return Certificate{}, s.failRenewal(ctx, value, job, commandExit, output, err, "certificate.issue", actor, clientIP)
+	}
+	if _, err := s.publisher.Publish(value.OutputDirectory, certfiles.Payload{
+		CertPEM: certPEM, ChainPEM: chainPEM, FullchainPEM: fullchainPEM, PrivateKeyPEM: privateKeyPEM,
+		MetadataJSON: append(metadataDocument, '\n'), CreateMarker: value.CreateRenewedMarker,
+	}); err != nil {
+		return Certificate{}, s.failRenewal(ctx, value, job, commandExit, output, err, "certificate.issue", actor, clientIP)
+	}
+	value.Issuer, value.SerialNumber, value.FingerprintSHA256 = metadataIssuer, metadataSerial, metadataFingerprint
+	value.NotBefore, value.NotAfter = timePointer(notBefore), timePointer(notAfter)
+	if err := s.store.MarkCertificateIssued(ctx, value); err != nil {
+		return Certificate{}, err
+	}
+	_ = s.store.FinishJob(ctx, job.ID, "succeeded", commandExit, output, "")
+	_ = s.audit(ctx, value.ID, "certificate.issue", actor, clientIP, "succeeded", map[string]any{"mode": value.Mode})
+	return s.Get(ctx, value.ID)
 }
 
 func (s *Service) RunRenewalScan(ctx context.Context, policy scheduler.Policy) error {
@@ -321,11 +443,11 @@ func dueForRenewal(value Certificate, now time.Time) bool {
 	return !now.Before(value.NotAfter.Add(-time.Duration(value.RenewBeforeDays) * 24 * time.Hour))
 }
 
-func (s *Service) failRenewal(ctx context.Context, value Certificate, job *jobs.Run, exit int, output string, renewErr error, actor, clientIP string) error {
+func (s *Service) failRenewal(ctx context.Context, value Certificate, job *jobs.Run, exit int, output string, renewErr error, eventType, actor, clientIP string) error {
 	message := safeError(renewErr)
 	_ = s.store.FinishJob(ctx, job.ID, "failed", exit, output, message)
 	_ = s.store.MarkCertificateFailed(ctx, value.ID, message)
-	_ = s.audit(ctx, value.ID, "certificate.renew", actor, clientIP, "failed", map[string]any{"mode": value.Mode})
+	_ = s.audit(ctx, value.ID, eventType, actor, clientIP, "failed", map[string]any{"mode": value.Mode})
 	return renewErr
 }
 

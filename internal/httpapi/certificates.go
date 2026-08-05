@@ -125,6 +125,24 @@ func (rt *Router) renewCertificate(w http.ResponseWriter, r *http.Request) {
 	rt.runCertificateRenewal(w, r, false)
 }
 
+func (rt *Router) issueCertificate(w http.ResponseWriter, r *http.Request) {
+	actor, _ := rt.auth.CurrentUser(r)
+	value, err := rt.certificates.Issue(r.Context(), chi.URLParam(r, "id"), actor, auth.ClientIP(r, rt.config.TrustsProxy(r.RemoteAddr)))
+	if errors.Is(err, certificate.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "CERT_NOT_FOUND", "证书不存在")
+		return
+	}
+	if errors.Is(err, certificate.ErrOperationRunning) {
+		writeError(w, http.StatusConflict, "CERT_OPERATION_RUNNING", "该证书已有任务正在运行")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "CERT_ISSUE_FAILED", "证书重新签发失败，请查看任务日志")
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
 func (rt *Router) forceRenewCertificate(w http.ResponseWriter, r *http.Request) {
 	if !rt.auth.Reauthenticated(r) {
 		writeError(w, http.StatusForbidden, "AUTH_REAUTH_REQUIRED", "强制续签前必须重新认证")

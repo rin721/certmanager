@@ -22,6 +22,7 @@ import (
 	"github.com/rin721/certmate/internal/certificate/parser"
 	"github.com/rin721/certmate/internal/certificate/selfsigned"
 	"github.com/rin721/certmate/internal/credential"
+	"github.com/rin721/certmate/internal/jobs"
 	"github.com/rin721/certmate/internal/store/sqlite"
 )
 
@@ -255,6 +256,47 @@ func TestSameCertificateRenewalIsMutuallyExclusive(t *testing.T) {
 	close(engine.release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManualIssueReusesExistingCertificateConfiguration(t *testing.T) {
+	ctx := context.Background()
+	dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(certDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	service := certificate.NewService(store, fakeSelfSignedEngine{}, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), nil, nil)
+	value, err := service.CreateSelfSigned(ctx, certificate.CreateSelfSignedRequest{
+		Name: "人工重新签发", PrimaryDomain: "example.com", KeyType: "ec-256", ValidDays: 90,
+		OutputDirectory: "example-com", AutoRenewEnabled: true, RenewBeforeDays: 15,
+	}, "admin", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := service.Issue(ctx, value.ID, "admin", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Status != certificate.StatusActive || issued.ID != value.ID {
+		t.Fatalf("重新签发结果错误: %+v", issued)
+	}
+	runs, err := store.Jobs(ctx, jobs.Query{CertificateID: value.ID, JobType: "issue"})
+	if err != nil || len(runs) != 1 || runs[0].Status != "succeeded" {
+		t.Fatalf("重新签发任务错误: runs=%+v err=%v", runs, err)
+	}
+	if err := store.SetCertificateStatus(ctx, value.ID, certificate.StatusRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Issue(ctx, value.ID, "admin", "127.0.0.1"); err == nil {
+		t.Fatal("已撤销证书不应允许重新签发")
 	}
 }
 

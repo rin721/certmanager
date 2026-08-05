@@ -84,6 +84,7 @@ func NewRouter(cfg config.Config, logger *slog.Logger, authManager *auth.Manager
 				r.Get("/certificates/{id}", router.getCertificate)
 				r.Patch("/certificates/{id}", router.updateCertificate)
 				r.Delete("/certificates/{id}", router.deleteCertificate)
+				r.Post("/certificates/{id}/issue", router.issueCertificate)
 				r.Post("/certificates/{id}/renew", router.renewCertificate)
 				r.Post("/certificates/{id}/force-renew", router.forceRenewCertificate)
 				r.Post("/certificates/{id}/revoke", router.revokeCertificate)

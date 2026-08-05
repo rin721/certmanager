@@ -8,6 +8,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { CertificateDetailPage, CertificateListPage, CreateCertificatePage } from './CertificatePages'
 import { LoginPage } from './LoginPage'
 import { RenewalSettingsPage } from './RenewalSettingsPage'
+import { isSafeCADirectoryURL } from './validation'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -57,6 +58,27 @@ test('自动续签配置保存后显示立即生效', async () => {
   renderWithClient(<RenewalSettingsPage />)
   fireEvent.click(await screen.findByRole('button', { name: '保存并立即生效' }))
   expect(await screen.findByText('新策略已生效。')).toBeInTheDocument()
+})
+
+test('自定义 ACME Directory URL 只接受安全 HTTPS 地址', () => {
+  expect(isSafeCADirectoryURL('https://acme.example.com/directory')).toBe(true)
+  expect(isSafeCADirectoryURL('http://acme.example.com/directory')).toBe(false)
+  expect(isSafeCADirectoryURL('https://user:password@acme.example.com/directory')).toBe(false)
+  expect(isSafeCADirectoryURL('https://acme.example.com/directory#fragment')).toBe(false)
+})
+
+test('证书详情页提供兼容的重新签发操作', async () => {
+  const requests: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    requests.push(`${init?.method ?? 'GET'} ${url}`)
+    if (url.endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+    if (init?.method === 'POST' && url.endsWith('/issue')) return new Response(JSON.stringify(certificateFixture), { status: 200 })
+    return new Response(JSON.stringify(certificateFixture), { status: 200 })
+  }))
+  renderWithClient(<Routes><Route path="/certificates/:id" element={<CertificateDetailPage />} /></Routes>, '/certificates/cert-1')
+  fireEvent.click(await screen.findByRole('button', { name: '重新签发' }))
+  await waitFor(() => expect(requests.some((item) => item.endsWith('POST /api/v1/certificates/cert-1/issue'))).toBe(true))
 })
 
 test('私钥查看要求二次认证且响应只保存在组件内存', async () => {

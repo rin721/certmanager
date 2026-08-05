@@ -126,6 +126,10 @@ TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 
 创建公共证书前先在“DNS 凭据”中配置 Provider，或准备 HTTP-01 转发。普通任务不会使用 `--force`；只有管理员明确二次确认“强制续签”时才会传递该参数。
 
+ACME CA 可以选择 Let’s Encrypt 正式环境、Staging、ZeroSSL 或填写自定义 HTTPS Directory URL。自定义地址不得包含用户名、密码或 URL 片段；正式签发前建议先在 Staging 验证域名和 DNS 配置。
+
+创建后的证书详情页提供“重新签发”操作。它不会改变证书配置，使用现有域名、验证方式、DNS 凭据和 CA 设置重新生成并原子替换文件；签发中的、禁用的或已撤销的证书不会接受该操作。
+
 ## 12. 将证书映射给 Nginx
 
 业务 Nginx 只需以只读方式挂载证书目录：
@@ -173,7 +177,7 @@ ACME 到期判断与协议由 acme.sh 负责；CertMate 按证书策略启动普
 
 ## 16. Cloudflare DNS-01 示例
 
-在 Cloudflare 创建仅能编辑目标 Zone DNS 的 API Token。进入“DNS 凭据”，选择 Cloudflare，推荐填写 `CF_Token`；不要使用全局 API Key。凭据可加密保存到 SQLite，或只保存环境变量名引用。随后创建公共证书，选择 DNS-01 与该凭据。
+在 Cloudflare 创建仅能编辑目标 Zone DNS 的 API Token。进入“DNS 凭据”，选择 Cloudflare，推荐填写 `CF_Token`；不要使用全局 API Key。凭据可加密保存到 SQLite，或只保存环境变量名引用。页面中的“测试”只做本地解密/环境变量解析，不会调用第三方 DNS API 或修改记录。随后创建公共证书，选择 DNS-01 与该凭据。
 
 加密模式依赖 `APP_ENCRYPTION_KEY` 的 AES-GCM 保护；环境引用模式不会把值写入数据库。页面与 API 永远只返回字段名/掩码，不返回凭据值。
 
@@ -242,6 +246,7 @@ make build
 make test
 make test-e2e
 make lint
+make verify
 make vuln
 make license
 make docker-build
@@ -249,6 +254,8 @@ make docker-up
 make docker-down
 make clean
 ```
+
+Windows PowerShell 可运行 `./scripts/verify.ps1`，它执行同一组格式、Go、前端构建和高等级依赖审计检查；Docker 构建仍需在安装 Docker Engine 的环境中单独执行。
 
 主要依赖均只承担一个成熟能力：chi（HTTP 路由）、Gorilla Sessions/CSRF（Cookie 会话与 CSRF）、goose（数据库迁移）、robfig/cron（Cron 解析与调度）、modernc SQLite（无 CGO 持久化）、x/crypto（bcrypt）；前端使用 React/MUI（界面）、React Router（路由）、TanStack Query（服务端状态）、React Hook Form + Zod（表单与校验）、Vitest/Playwright（测试）。证书协议与签名分别委托给固定版本 acme.sh 和 OpenSSL，不在项目内重复实现。
 

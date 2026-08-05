@@ -1,7 +1,7 @@
 GO ?= go
 NPM ?= npm
 
-.PHONY: dev frontend-dev backend-dev build test test-e2e lint vuln license docker-build docker-up docker-down clean
+.PHONY: dev frontend-dev backend-dev build test test-e2e lint verify vuln license docker-build docker-up docker-down clean
 
 dev:
 	@echo "请在两个终端分别运行 make backend-dev 和 make frontend-dev"
@@ -26,6 +26,14 @@ test-e2e:
 lint:
 	$(GO) vet ./...
 	cd web && $(NPM) run lint
+
+verify:
+	$(GO) test ./...
+	$(GO) vet ./...
+	cd web && $(NPM) run lint
+	cd web && $(NPM) run test
+	cd web && $(NPM) run build
+	cd web && $(NPM) audit --audit-level=high --registry=https://registry.npmjs.org
 
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...

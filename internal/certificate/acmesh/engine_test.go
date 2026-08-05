@@ -39,16 +39,27 @@ func TestHTTP01RejectsWildcard(t *testing.T) {
 
 func TestRenewForceIsExplicit(t *testing.T) {
 	cli := NewCLI("acme.sh", "/data/acme", "/data/challenges", "/data/temp", 0)
-	normal, err := cli.renewArguments(RenewRequest{PrimaryDomain: "example.com", KeyType: "ec-256"})
+	normal, err := cli.renewArguments(RenewRequest{PrimaryDomain: "example.com", KeyType: "ec-256", CADirectory: "letsencrypt"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	forced, err := cli.renewArguments(RenewRequest{PrimaryDomain: "example.com", KeyType: "ec-256", Force: true})
+	forced, err := cli.renewArguments(RenewRequest{PrimaryDomain: "example.com", KeyType: "ec-256", Force: true, CADirectory: "letsencrypt"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(normal, " "), "--force") || !strings.Contains(strings.Join(forced, " "), "--force") {
 		t.Fatal("--force 只能由显式 Force=true 添加")
+	}
+}
+
+func TestCustomCADirectoryIsPassedToRenew(t *testing.T) {
+	cli := NewCLI("acme.sh", "/data/acme", "/data/challenges", "/data/temp", 0)
+	arguments, err := cli.renewArguments(RenewRequest{PrimaryDomain: "example.com", KeyType: "ec-256", CADirectory: "https://acme.example.com/directory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(arguments, " "), "--server https://acme.example.com/directory") {
+		t.Fatalf("自定义 CA 未透传: %v", arguments)
 	}
 }
 
