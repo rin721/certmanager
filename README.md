@@ -25,7 +25,7 @@ CertMate 不是企业 PKI、密钥托管服务或多租户证书平台。第一�
 
 ## 5. Docker Compose 部署
 
-Linux 主机安装 Git、Bash、OpenSSL、Docker Engine 和 Docker Compose v2 后，使用两阶段部署脚本：
+Linux 主机安装 Git、Bash、OpenSSL、Apache `htpasswd`、Docker Engine 和 Docker Compose v2 后，使用两阶段部署脚本：
 
 ```bash
 git clone <repo-addr> certmate
@@ -34,7 +34,10 @@ cd certmate
 # 第一次只创建 .env 并停止。
 bash scripts/deploy.sh init
 
-# 编辑 .env：自定义管理员账户、宿主机数据目录和证书目录。
+# 输入管理员密码两次；脚本只保存 bcrypt 哈希。
+bash scripts/deploy.sh configure-admin
+
+# 编辑 .env：确认宿主机数据目录、证书目录和端口。
 nano .env
 
 # 第二次自动生成 Session/加密 Secret，构建并启动 Compose。

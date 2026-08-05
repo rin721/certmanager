@@ -78,6 +78,12 @@ else
     printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
 fi
 EOF
+    cat > "${mock_bin}/htpasswd" <<'EOF'
+#!/usr/bin/env bash
+printf 'htpasswd %s\n' "$*" >> "${MOCK_LOG}"
+username=${!#}
+printf '%s:%s\n' "${username}" '$2y$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+EOF
     cat > "${mock_bin}/git" <<'EOF'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "${MOCK_LOG}"
@@ -89,7 +95,7 @@ elif [[ "${1:-}" == "pull" && "${MOCK_GIT_PULL_FAILURE:-}" == "1" ]]; then
     exit 1
 fi
 EOF
-    chmod +x "${mock_bin}/docker" "${mock_bin}/openssl" "${mock_bin}/git"
+    chmod +x "${mock_bin}/docker" "${mock_bin}/openssl" "${mock_bin}/htpasswd" "${mock_bin}/git"
 }
 
 new_workspace() {
@@ -104,14 +110,18 @@ new_workspace() {
 }
 
 run_deploy() {
-    local workspace=$1 output_file=$2 mode=$3
+    local workspace=$1 output_file=$2 mode=$3 extra_argument=${4:-}
+    local arguments=("${mode}")
+    if [[ -n "${extra_argument}" ]]; then
+        arguments+=("${extra_argument}")
+    fi
     PATH="${workspace}/mock-bin:${PATH}" \
         MOCK_LOG="${workspace}/mock.log" \
         MOCK_OPENSSL_COUNT="${workspace}/openssl.count" \
         MOCK_PROJECT_ROOT="${workspace}" \
         MOCK_GIT_DIFF_FAILURE="${MOCK_GIT_DIFF_FAILURE:-}" \
         MOCK_GIT_PULL_FAILURE="${MOCK_GIT_PULL_FAILURE:-}" \
-        bash "${workspace}/scripts/deploy.sh" "${mode}" > "${output_file}" 2>&1
+        bash "${workspace}/scripts/deploy.sh" "${arguments[@]}" > "${output_file}" 2>&1
 }
 
 configure_common_values() {
@@ -181,6 +191,25 @@ test_secret_file_references_skip_generation() {
     run_deploy "${workspace}" "${output_file}" init
     assert_not_contains "${workspace}/mock.log" "openssl "
     pass "Secret 文件引用不会生成内联值"
+}
+
+test_configure_admin_writes_bcrypt_only() {
+    local workspace output_file password_hash
+    workspace="$(new_workspace configure-admin)"
+    output_file="${workspace}/output.log"
+    run_deploy "${workspace}" "${output_file}" init
+    if ! run_deploy "${workspace}" "${output_file}" configure-admin certadmin; then
+        sed 's/^/  /' "${output_file}" >&2
+        fail "configure-admin 执行失败"
+    fi
+    [[ "$(env_value "${workspace}/.env" ADMIN_USERNAME)" == "certadmin" ]] || fail "管理员用户名没有写入 .env"
+    password_hash="$(env_value "${workspace}/.env" ADMIN_PASSWORD_HASH)"
+    [[ "${password_hash}" == "'\$2y\$12\$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'" ]] || fail "bcrypt 哈希没有使用单引号保存"
+    [[ -z "$(env_value "${workspace}/.env" ADMIN_PASSWORD)" ]] || fail "明文管理员密码不应写入 .env"
+    [[ -z "$(env_value "${workspace}/.env" ADMIN_PASSWORD_FILE)" ]] || fail "旧密码文件来源应被清空"
+    [[ -z "$(env_value "${workspace}/.env" ADMIN_PASSWORD_HASH_FILE)" ]] || fail "旧哈希文件来源应被清空"
+    assert_contains "${workspace}/mock.log" "htpasswd -nBC 12 certadmin"
+    pass "交互配置只保存 bcrypt 哈希"
 }
 
 test_invalid_configuration_stops_before_docker() {
@@ -289,6 +318,7 @@ test_update_failure_stops_before_docker() {
 test_first_run_stops_after_copy
 test_second_run_generates_once_and_deploys
 test_secret_file_references_skip_generation
+test_configure_admin_writes_bcrypt_only
 test_invalid_configuration_stops_before_docker
 test_update_pulls_then_deploys
 test_update_failure_stops_before_docker

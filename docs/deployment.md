@@ -10,10 +10,24 @@
 - Git；
 - Bash；
 - OpenSSL；
+- Apache `htpasswd`（Debian/Ubuntu 的 `apache2-utils`、RHEL 系的 `httpd-tools`、Alpine 的 `apache2-utils`）；
 - Docker Engine；
 - Docker Compose v2，即 `docker compose` 命令。
 
 CertMate 只需要一个应用容器，不使用 Docker Socket。SQLite、acme.sh 状态和证书分别持久化到宿主机目录。
+
+常见发行版安装 `htpasswd`：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install apache2-utils
+
+# RHEL / Rocky / AlmaLinux
+sudo dnf install httpd-tools
+
+# Alpine
+sudo apk add apache2-utils
+```
 
 ## 2. 首次部署
 
@@ -39,7 +53,15 @@ bash scripts/deploy.sh init
 3. 显示必须配置的字段；
 4. 以成功状态停止，不生成 Secret，也不调用 Docker。
 
-现在编辑配置：
+先通过脚本配置管理员账户。脚本会先询问用户名，再由 `htpasswd` 隐藏输入密码并要求确认两次；密码不会进入 Shell 历史：
+
+```bash
+bash scripts/deploy.sh configure-admin
+```
+
+脚本最终只把单引号保护的 bcrypt 哈希写入 `ADMIN_PASSWORD_HASH`，并清空其他管理员密码来源，不会把明文密码写入 `.env`、命令行或日志。
+
+然后编辑其余配置：
 
 ```bash
 nano .env
@@ -48,11 +70,6 @@ nano .env
 至少确认以下内容：
 
 ```env
-ADMIN_USERNAME=certadmin
-
-# 简单方式：自定义高强度密码。生产环境更推荐下面的 bcrypt 方式。
-ADMIN_PASSWORD='替换为你自己的高强度长密码'
-
 # 默认映射到项目根目录下的相对目录。
 DATA_HOST_DIR=./data
 CERTS_HOST_DIR=./certs
@@ -68,22 +85,25 @@ APP_ENCRYPTION_KEY=
 
 `DATA_HOST_DIR` 保存 SQLite、acme.sh 状态、任务临时文件和备份；`CERTS_HOST_DIR` 保存对外使用的证书文件。它们必须是彼此独立的目录。
 
-### 2.3 推荐的管理员 bcrypt 配置
+### 2.3 管理员账户与密码轮换
 
-生产环境建议避免在容器环境中保留明文密码。安装 `htpasswd` 后生成 bcrypt：
+如果没有单独运行 `configure-admin`，第二次在交互终端运行 `init` 时也会检测到管理员密码缺失，并进入相同的用户名和密码配置流程。
+
+以后轮换管理员用户名或密码仍使用：
 
 ```bash
-htpasswd -bnBC 12 '' '你的管理员密码' | tr -d ':\n'
+bash scripts/deploy.sh configure-admin
+bash scripts/deploy.sh init
 ```
 
-将输出完整写入 `ADMIN_PASSWORD_HASH`，并清空 `ADMIN_PASSWORD`：
+生成后的配置形式为：
 
 ```env
 ADMIN_PASSWORD_HASH='$2y$12$...'
 ADMIN_PASSWORD=
 ```
 
-bcrypt 包含 `$`，必须使用单引号。未加单引号时 Docker Compose 会进行变量插值，部署脚本会拒绝继续。
+bcrypt 包含 `$`，因此脚本会自动使用单引号保护。手工修改时如果漏掉单引号，Docker Compose 会进行变量插值，部署脚本会拒绝继续。
 
 应用选择管理员密码的优先级固定为：
 

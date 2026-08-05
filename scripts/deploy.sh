@@ -45,6 +45,8 @@ CertMate Docker Compose 部署脚本
 用法：
   bash scripts/deploy.sh init    初始化配置或按现有配置构建并启动服务
   bash scripts/deploy.sh update  执行 git pull --ff-only 后构建并更新服务
+  bash scripts/deploy.sh configure-admin [用户名]
+                                 交互输入密码并保存 bcrypt 哈希
   bash scripts/deploy.sh help    显示帮助
 
 首次执行 init 只会复制 .env.example 为 .env，然后停止并提示人工配置。
@@ -140,8 +142,90 @@ write_env_value() {
     chmod 600 "${ENV_TEMP_FILE}" || die "无法保护临时配置文件权限。"
     mv -f -- "${ENV_TEMP_FILE}" "${ENV_FILE}" || die "无法原子替换 .env。"
     ENV_TEMP_FILE=""
-    ENV_VALUES[${key}]=${value}
     ENV_RAW_VALUES[${key}]=${value}
+    ENV_VALUES[${key}]="$(decode_env_value "${value}")"
+}
+
+write_admin_credentials() {
+    local username=$1 password_hash=$2
+    ENV_TEMP_FILE="$(mktemp "${ENV_FILE}.tmp.XXXXXX")" || die "无法在 .env 所在目录创建临时文件。"
+    if ! awk -v username="${username}" -v password_hash="'${password_hash}'" '
+        BEGIN {
+            replacement["ADMIN_USERNAME"] = "ADMIN_USERNAME=" username
+            replacement["ADMIN_PASSWORD_HASH_FILE"] = "ADMIN_PASSWORD_HASH_FILE="
+            replacement["ADMIN_PASSWORD_HASH"] = "ADMIN_PASSWORD_HASH=" password_hash
+            replacement["ADMIN_PASSWORD_FILE"] = "ADMIN_PASSWORD_FILE="
+            replacement["ADMIN_PASSWORD"] = "ADMIN_PASSWORD="
+        }
+        {
+            comparable = $0
+            sub(/\r$/, "", comparable)
+            if (comparable ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) {
+                key = comparable
+                sub(/^[[:space:]]*/, "", key)
+                sub(/[[:space:]]*=.*$/, "", key)
+                if (key in replacement) {
+                    print replacement[key]
+                    written[key] = 1
+                    next
+                }
+            }
+            print $0
+        }
+        END {
+            order[1] = "ADMIN_USERNAME"
+            order[2] = "ADMIN_PASSWORD_HASH_FILE"
+            order[3] = "ADMIN_PASSWORD_HASH"
+            order[4] = "ADMIN_PASSWORD_FILE"
+            order[5] = "ADMIN_PASSWORD"
+            for (position = 1; position <= 5; position++) {
+                key = order[position]
+                if (!written[key]) {
+                    print replacement[key]
+                }
+            }
+        }
+    ' "${ENV_FILE}" > "${ENV_TEMP_FILE}"; then
+        die "更新管理员账户配置失败。"
+    fi
+    chmod 600 "${ENV_TEMP_FILE}" || die "无法保护临时配置文件权限。"
+    mv -f -- "${ENV_TEMP_FILE}" "${ENV_FILE}" || die "无法原子替换 .env。"
+    ENV_TEMP_FILE=""
+    parse_env_file
+}
+
+configure_admin_credentials() {
+    local requested_username=${1:-} username password_output password_hash
+    require_command htpasswd
+
+    if [[ -n "${requested_username}" ]]; then
+        username=${requested_username}
+    else
+        [[ -t 0 && -t 1 ]] || die "当前不是交互终端；请执行 bash scripts/deploy.sh configure-admin <用户名> 并在终端中输入密码。"
+        read -r -p "管理员用户名 [$(env_value ADMIN_USERNAME admin)]：" username
+        username=${username:-$(env_value ADMIN_USERNAME admin)}
+    fi
+    [[ "${username}" =~ ^[A-Za-z0-9._@-]{1,64}$ ]] || die "管理员用户名只能包含字母、数字、点、下划线、@ 和连字符，长度为 1-64。"
+
+    printf '请按 htpasswd 提示输入并再次确认管理员密码；输入内容不会显示。\n'
+    password_output="$(htpasswd -nBC 12 "${username}")" || die "管理员密码哈希生成失败。"
+    password_hash=${password_output#*:}
+    [[ "${password_output}" == "${username}:"* && "${password_hash}" =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || die "htpasswd 未返回有效的 bcrypt 哈希。"
+
+    write_admin_credentials "${username}" "${password_hash}"
+    log "已保存管理员 ${username} 的 bcrypt 哈希，并清空其他管理员密码来源。"
+}
+
+ensure_admin_config() {
+    local key
+    for key in ADMIN_PASSWORD_HASH_FILE ADMIN_PASSWORD_HASH ADMIN_PASSWORD_FILE ADMIN_PASSWORD; do
+        if [[ -n "$(env_value "${key}")" ]]; then
+            return
+        fi
+    done
+    [[ -t 0 && -t 1 ]] || die "尚未配置管理员密码。请在交互终端运行 bash scripts/deploy.sh configure-admin <用户名>。"
+    printf '尚未配置管理员账户，现在进入安全配置。\n'
+    configure_admin_credentials
 }
 
 generate_secret() {
@@ -282,7 +366,6 @@ prepare_host_directories() {
 validate_runtime_config() {
     local app_port session_secret encryption_key
     validate_sensitive_quoting
-    validate_admin_config
     app_port="$(env_value APP_PORT 8080)"
     validate_integer_range APP_PORT "${app_port}" 1 65535
 
@@ -361,11 +444,14 @@ initialize() {
 已创建 .env，本次运行按设计停止，不会生成 Secret 或启动 Docker。
 
 请先编辑 .env，至少确认：
-  1. ADMIN_USERNAME
-  2. ADMIN_PASSWORD_HASH_FILE、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD_FILE、ADMIN_PASSWORD 中的一项
-  3. DATA_HOST_DIR（宿主机数据目录）
-  4. CERTS_HOST_DIR（宿主机证书目录）
-  5. APP_PORT、APP_UID、APP_GID 是否符合部署环境
+  1. DATA_HOST_DIR（宿主机数据目录）
+  2. CERTS_HOST_DIR（宿主机证书目录）
+  3. APP_PORT、APP_UID、APP_GID 是否符合部署环境
+
+管理员账户推荐由脚本安全配置：
+  bash scripts/deploy.sh configure-admin
+随后按提示输入并确认明文密码；脚本只会把 bcrypt 哈希写入 .env。
+如果跳过该命令，下一次交互运行 init 时也会自动提示配置。
 
 SESSION_SECRET 和 APP_ENCRYPTION_KEY 保持为空，下一次运行会自动生成。
 配置完成后再次执行：bash scripts/deploy.sh init
@@ -381,6 +467,9 @@ EOF
     require_command stat
     parse_env_file
     validate_sensitive_quoting
+    ensure_admin_config
+    validate_sensitive_quoting
+    validate_admin_config
     ensure_secret SESSION_SECRET SESSION_SECRET_FILE
     ensure_secret APP_ENCRYPTION_KEY APP_ENCRYPTION_KEY_FILE
     validate_runtime_config
@@ -403,6 +492,16 @@ update() {
     exec "${BASH}" "${SCRIPT_DIR}/deploy.sh" init
 }
 
+configure_admin() {
+    [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] || die "请先运行 init 创建 .env。"
+    chmod 600 "${ENV_FILE}" || die "无法保护 .env 文件权限。"
+    require_command awk
+    require_command mktemp
+    parse_env_file
+    validate_sensitive_quoting
+    configure_admin_credentials "${1:-}"
+}
+
 main() {
     case "${1:-help}" in
         init)
@@ -410,6 +509,9 @@ main() {
             ;;
         update)
             update
+            ;;
+        configure-admin)
+            configure_admin "${2:-}"
             ;;
         help|-h|--help)
             usage
