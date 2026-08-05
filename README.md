@@ -43,15 +43,17 @@ curl http://localhost:8080/readyz
 
 本机浏览器打开 `http://localhost:8080`。远程生产访问必须放在 HTTPS 反向代理后；不要把未加密的管理端口直接暴露到公网。
 
+完整的 Compose、裸 `docker run`、Git 更新、动态配置和验收清单见 [Docker 部署手册](docs/deployment.md)。
+
 ## 6. 创建 `.env`
 
 ```bash
 cp .env.example .env
-openssl rand -hex 32
-openssl rand -hex 32
 ```
 
-将两个不同的随机值分别写入 `SESSION_SECRET` 和 `APP_ENCRYPTION_KEY`。不要提交 `.env`。生产环境更推荐 Docker Secret/只读文件，并配置 `SESSION_SECRET_FILE`、`APP_ENCRYPTION_KEY_FILE` 与密码文件变量。
+实际 Docker 部署不要手工填写占位值；请按 [Docker 部署手册](docs/deployment.md) 中的初始化命令生成并持久化两个不同的随机值到 `SESSION_SECRET` 和 `APP_ENCRYPTION_KEY`。不要提交 `.env`。生产环境更推荐 Docker Secret/只读文件，并配置 `SESSION_SECRET_FILE`、`APP_ENCRYPTION_KEY_FILE` 与密码文件变量。
+
+`.env.example` 已按“必填项、生成方式、容器内路径、宿主机映射和安全选项”加入中文注释；第一次部署建议先阅读注释，再复制为 `.env`。
 
 关键目录示例：
 
@@ -99,7 +101,7 @@ Web 页面只能填写 `/certs` 下的小写字母、数字、连字符子目录
 ## 9. 启动 Docker Compose
 
 ```bash
-docker compose config
+docker compose config --quiet
 docker compose build
 docker compose up -d
 docker compose logs -f certmate
@@ -145,7 +147,7 @@ docker run -d \
 
 ```bash
 git pull --ff-only
-docker compose config
+docker compose config --quiet
 docker compose build --pull
 docker compose up -d --force-recreate
 docker compose ps
@@ -331,6 +333,7 @@ internal/systeminfo/        限时、限输出的运行信息采集
 migrations/                 goose 嵌入式 SQL 迁移
 web/                        React、MUI、TanStack Query、Vitest、Playwright
 deploy/                     反向代理示例
+docs/deployment.md          Docker 部署、升级与配置生效手册
 .github/                    CI、Release 和 Dependabot
 Dockerfile / compose.yaml   多阶段镜像与最小权限运行配置
 ```
