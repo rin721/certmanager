@@ -1,0 +1,14 @@
+.env
+data/
+certs/
+bin/
+coverage/
+web/node_modules/
+web/playwright-report/
+web/test-results/
+.e2e-data/
+.e2e-certs/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.11.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci --ignore-scripts
+      - name: Go tests with race detector
+        run: go test -race ./...
+      - name: Go vet
+        run: go vet ./...
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Frontend lint and tests
+        working-directory: web
+        run: npm run lint && npm run test && npm run build
+      - name: Frontend dependency audit
+        working-directory: web
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+      - name: Dependency license scan
+        run: |
+          go run github.com/google/go-licenses@v1.6.0 report ./...
+          cd web
+          npx --yes license-checker-rseidelsohn@5.0.1 --production --excludePackages 'certmate-web@0.1.0' --onlyAllow 'MIT;BSD-3-Clause;ISC'
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: E2E smoke
+        working-directory: web
+        run: npm run test:e2e
+      - name: Validate Compose and image build
+        run: cp .env.example .env && docker compose config && docker compose build

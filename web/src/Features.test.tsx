@@ -1,0 +1,87 @@
+// @vitest-environment jsdom
+
+import '@testing-library/jest-dom/vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { afterEach, expect, test, vi } from 'vitest'
+import { CertificateDetailPage, CertificateListPage, CreateCertificatePage } from './CertificatePages'
+import { LoginPage } from './LoginPage'
+import { RenewalSettingsPage } from './RenewalSettingsPage'
+
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+function renderWithClient(element: React.ReactNode, route = '/') {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[route]}>{element}</MemoryRouter></QueryClientProvider>)
+}
+
+test('登录页隐藏后端细节并显示稳定错误', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    if (String(input).endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+    return new Response(JSON.stringify({ error: { code: 'AUTH_INVALID_CREDENTIALS', message: '用户名或密码错误' } }), { status: 401 })
+  }))
+  renderWithClient(<LoginPage appName="CertMate" />)
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'wrong-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '登录' }))
+  expect(await screen.findByText('用户名或密码错误')).toBeInTheDocument()
+  expect(screen.queryByText(/stack|SQL|bcrypt/i)).not.toBeInTheDocument()
+})
+
+test('证书列表显示模式、状态和有效期', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ items: [certificateFixture] }), { status: 200 })))
+  renderWithClient(<CertificateListPage />)
+  expect(await screen.findByText('example.com')).toBeInTheDocument()
+  expect(screen.getByText('active')).toBeInTheDocument()
+})
+
+test('创建证书表单按五个步骤推进并校验域名字段', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200 })))
+  renderWithClient(<CreateCertificatePage />)
+	expect(screen.getByText('证书类型')).toBeInTheDocument()
+	fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+	fireEvent.change(await screen.findByLabelText('证书名称'), { target: { value: '测试证书' } })
+	fireEvent.change(screen.getByLabelText('主域名'), { target: { value: 'example.com' } })
+  fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+  expect(await screen.findByLabelText('密钥类型')).toBeInTheDocument()
+})
+
+test('自动续签配置保存后显示立即生效', async () => {
+  const policy = { enabled: true, cron_expression: '0 3 * * *', timezone: 'Asia/Shanghai', max_concurrency: 2, retry_count: 2, retry_interval_seconds: 60, updated_at: '2026-08-05T00:00:00Z' }
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+    if (init?.method === 'PUT') return new Response(JSON.stringify({ policy: { ...policy, updated_at: '2026-08-05T00:01:00Z' }, status: { running: true, active_runs: 0 } }), { status: 200 })
+    return new Response(JSON.stringify({ policy, status: { running: true, active_runs: 0, next_run_at: '2026-08-06T03:00:00Z' } }), { status: 200 })
+  }))
+  renderWithClient(<RenewalSettingsPage />)
+  fireEvent.click(await screen.findByRole('button', { name: '保存并立即生效' }))
+  expect(await screen.findByText('新策略已生效。')).toBeInTheDocument()
+})
+
+test('私钥查看要求二次认证且响应只保存在组件内存', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/files')) return new Response(JSON.stringify({ items: [{ type: 'private-key', filename: 'privkey.pem', private: true, container_path: '/certs/example-com/privkey.pem' }] }), { status: 200 })
+    if (url.endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+    if (url.endsWith('/reveal')) return new Response('PRIVATE TEST VALUE', { status: 200 })
+    return new Response(JSON.stringify(certificateFixture), { status: 200 })
+  }))
+  renderWithClient(<Routes><Route path="/certificates/:id" element={<CertificateDetailPage />} /></Routes>, '/certificates/cert-1')
+  fireEvent.click(await screen.findByRole('tab', { name: '证书文件' }))
+  fireEvent.click(await screen.findByRole('button', { name: '查看' }))
+  expect(screen.getByText('重新认证以查看私钥')).toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('管理员密码'), { target: { value: 'test-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认查看' }))
+  expect(await screen.findByText('PRIVATE TEST VALUE')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+  await waitFor(() => expect(screen.queryByText('PRIVATE TEST VALUE')).not.toBeInTheDocument())
+})
+
+const certificateFixture = {
+  id: 'cert-1', name: 'Example', mode: 'self_signed', primary_domain: 'example.com', domains: ['example.com'],
+  key_type: 'ec-256', status: 'active', output_directory: 'example-com', issuer: 'Example', serial_number: '1',
+  not_before: '2026-08-05T00:00:00Z', not_after: '2027-08-05T00:00:00Z', fingerprint_sha256: 'AA',
+  auto_renew_enabled: true, renew_before_days: 30, self_signed_valid_days: 365, create_renewed_marker: true,
+  created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:00Z',
+}

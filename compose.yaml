@@ -1,0 +1,32 @@
+services:
+  certmate:
+    build:
+      context: .
+      args:
+        VERSION: local
+        ACME_SH_VERSION: 3.1.4
+        ACME_SH_SHA256: e5f8e187bbf5251e0cd8891f2622daab9850366bd17bea9f92c2fe2ee091fd32
+    image: certmate:local
+    container_name: certmate
+    restart: unless-stopped
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    env_file:
+      - .env
+    volumes:
+      - "${DATA_HOST_DIR:-./data}:/data"
+      - "${CERTS_HOST_DIR:-./certs}:/certs"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1770,uid=10001,gid=10001
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "/app/certmate", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
