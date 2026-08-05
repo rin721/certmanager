@@ -12,7 +12,7 @@ FROM scratch AS setup-helper
 COPY --from=setup-helper-builder /out/setup-helper /setup-helper
 ENTRYPOINT ["/setup-helper"]
 
-FROM node:24.11.1-alpine3.23 AS frontend-builder
+FROM node:26.5.1-alpine3.23 AS frontend-builder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
