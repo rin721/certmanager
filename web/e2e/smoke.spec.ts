@@ -41,3 +41,22 @@ test('管理员完成自签名证书与动态续签 smoke 流程', async ({ page
   await page.getByRole('button', { name: '退出' }).click()
   await expect(page.getByRole('heading', { name: /登录 CertMate/ })).toBeVisible()
 })
+
+test('ACME 表单在提交前拒绝通配符冗余 SAN', async ({ page }) => {
+  await page.goto('/login')
+  await page.getByLabel('用户名').fill('admin')
+  await page.getByLabel('密码').fill('e2e-test-password')
+  await page.getByRole('button', { name: '登录' }).click()
+  await expect(page.getByText(/欢迎，admin/)).toBeVisible()
+
+  await page.getByRole('link', { name: '创建证书' }).click()
+	await page.getByRole('button', { name: '公共 CA 证书' }).click()
+	const next = () => page.locator('button[type="button"]').filter({ hasText: /^下一步$/ })
+	await next().click()
+	await page.getByLabel('证书名称').fill('冗余域名校验')
+	await page.getByLabel('主域名').fill('example.com')
+	await page.getByLabel('SAN 域名').fill('*.example.com\nwww.example.com')
+	await next().click()
+	await expect(page.getByText('SAN 域名 "www.example.com" 已被通配符 "*.example.com" 覆盖，请删除其中一个')).toBeVisible()
+	await expect(page.getByLabel('SAN 域名')).toBeVisible()
+})

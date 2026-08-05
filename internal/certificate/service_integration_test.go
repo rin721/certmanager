@@ -46,10 +46,12 @@ func (b *blockingSelfSignedEngine) Renew(_ context.Context, request selfsigned.R
 }
 
 type fakeACMEEngine struct {
-	request acmesh.IssueRequest
+	request    acmesh.IssueRequest
+	issueCalls int
 }
 
 func (f *fakeACMEEngine) Issue(_ context.Context, request acmesh.IssueRequest) (*acmesh.Result, error) {
+	f.issueCalls++
 	f.request = request
 	fixture, err := generatedFixture(selfsigned.Request{PrimaryDomain: request.PrimaryDomain, Domains: request.Domains, KeyType: request.KeyType, ValidDays: 90})
 	if err != nil {
@@ -68,6 +70,12 @@ func (f *fakeACMEEngine) Revoke(context.Context, acmesh.RevokeRequest) error { r
 func (f *fakeACMEEngine) Remove(context.Context, string) error               { return nil }
 func (f *fakeACMEEngine) Info(context.Context, string) (*acmesh.CertificateInfo, error) {
 	return &acmesh.CertificateInfo{}, nil
+}
+
+type panicCredentialResolver struct{}
+
+func (panicCredentialResolver) Resolve(context.Context, string) (credential.ProcessValues, error) {
+	panic("冗余域名必须在解析 DNS 凭据前被拒绝")
 }
 
 func (fakeSelfSignedEngine) Issue(_ context.Context, request selfsigned.Request) (*selfsigned.Result, error) {
@@ -103,7 +111,7 @@ func TestCreateSelfSignedVerticalSlice(t *testing.T) {
 	}
 	service := certificate.NewService(store, fakeSelfSignedEngine{}, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), nil, nil)
 	value, err := service.CreateSelfSigned(ctx, certificate.CreateSelfSignedRequest{
-		Name: "测试证书", PrimaryDomain: "example.com", SANs: []string{"www.example.com"},
+		Name: "测试证书", PrimaryDomain: "example.com", SANs: []string{"*.example.com", "www.example.com"},
 		KeyType: "ec-256", ValidDays: 90, OutputDirectory: "example-com",
 		AutoRenewEnabled: true, RenewBeforeDays: 15, CreateRenewedMarker: true,
 	}, "admin", "127.0.0.1")
@@ -214,6 +222,87 @@ func TestCreateACMEVerticalSliceWithFakeEngine(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(certDir, "example-com", "fullchain.pem")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCreateACMERejectsRedundantWildcardBeforeSideEffects(t *testing.T) {
+	ctx := context.Background()
+	dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(certDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeACMEEngine{}
+	service := certificate.NewService(store, nil, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), engine, panicCredentialResolver{})
+	_, err = service.CreateACME(ctx, certificate.CreateACMERequest{
+		Name: "冗余公共证书", PrimaryDomain: "example.com", SANs: []string{"*.example.com", "www.example.com"},
+		KeyType: "ec-256", OutputDirectory: "example-com", AutoRenewEnabled: true, RenewBeforeDays: 30,
+		ChallengeType: "dns-01", DNSCredentialID: "credential-id", CADirectoryURL: "letsencrypt", ACMEEmail: "admin@example.com",
+	}, "admin", "127.0.0.1")
+	var conflict *certificate.RedundantDomainError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v", err)
+	}
+	if engine.issueCalls != 0 {
+		t.Fatalf("ACME issue calls = %d", engine.issueCalls)
+	}
+	certificates, err := service.List(ctx)
+	if err != nil || len(certificates) != 0 {
+		t.Fatalf("certificates=%v err=%v", certificates, err)
+	}
+	jobRuns, err := store.Jobs(ctx, jobs.Query{})
+	if err != nil || len(jobRuns) != 0 {
+		t.Fatalf("jobs=%v err=%v", jobRuns, err)
+	}
+}
+
+func TestIssueLegacyFailedCertificateRejectsRedundantWildcardWithoutNewJob(t *testing.T) {
+	ctx := context.Background()
+	dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(certDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	legacy := certificate.Certificate{
+		ID: "legacy-failed", Name: "旧失败证书", Mode: certificate.ModeACME, PrimaryDomain: "example.com",
+		Domains: []string{"example.com", "*.example.com", "www.example.com"}, KeyType: "ec-256",
+		Status: certificate.StatusFailed, OutputDirectory: "example-com", AutoRenewEnabled: true, RenewBeforeDays: 30,
+		ChallengeType: "http-01", CADirectoryURL: "letsencrypt", ACMEEmail: "admin@example.com",
+	}
+	if err := store.CreateCertificate(ctx, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeACMEEngine{}
+	service := certificate.NewService(store, nil, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), engine, panicCredentialResolver{})
+	_, err = service.Issue(ctx, legacy.ID, "admin", "127.0.0.1")
+	var conflict *certificate.RedundantDomainError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v", err)
+	}
+	stored, err := store.Certificate(ctx, legacy.ID)
+	if err != nil || stored.Status != certificate.StatusFailed {
+		t.Fatalf("certificate=%+v err=%v", stored, err)
+	}
+	jobRuns, err := store.Jobs(ctx, jobs.Query{CertificateID: legacy.ID})
+	if err != nil || len(jobRuns) != 0 {
+		t.Fatalf("jobs=%v err=%v", jobRuns, err)
+	}
+	if engine.issueCalls != 0 {
+		t.Fatalf("ACME issue calls = %d", engine.issueCalls)
 	}
 }
 

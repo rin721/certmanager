@@ -301,6 +301,11 @@ func (s *Service) issueExisting(ctx context.Context, id string, force bool, jobT
 }
 
 func (s *Service) issueExistingCertificate(ctx context.Context, value Certificate, actor, clientIP string) (Certificate, error) {
+	if value.Mode == ModeACME {
+		if err := ValidateACMEDomains(value.PrimaryDomain, value.Domains); err != nil {
+			return Certificate{}, err
+		}
+	}
 	if err := s.store.SetCertificateStatus(ctx, value.ID, StatusIssuing); err != nil {
 		return Certificate{}, err
 	}
@@ -467,6 +472,9 @@ func (s *Service) CreateACME(ctx context.Context, request CreateACMERequest, act
 	}
 	primary, domains, err := NormalizeDomains(request.PrimaryDomain, request.SANs)
 	if err != nil {
+		return Certificate{}, err
+	}
+	if err := ValidateACMEDomains(primary, domains); err != nil {
 		return Certificate{}, err
 	}
 	if request.OutputDirectory == "" {

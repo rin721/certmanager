@@ -47,6 +47,15 @@ type archiveCertificateRequest struct {
 	Password          string `json:"password"`
 }
 
+func writeRedundantDomainError(w http.ResponseWriter, err error) bool {
+	var redundantDomainError *certificate.RedundantDomainError
+	if !errors.As(err, &redundantDomainError) {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "CERT_DOMAIN_REDUNDANT", redundantDomainError.Error())
+	return true
+}
+
 func (rt *Router) listCertificates(w http.ResponseWriter, r *http.Request) {
 	values, err := rt.certificates.List(r.Context())
 	if err != nil {
@@ -88,6 +97,9 @@ func (rt *Router) createCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		rt.logger.WarnContext(r.Context(), "certificate creation failed", "error", err)
+		if writeRedundantDomainError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "CERT_ISSUE_FAILED", "证书创建失败，请检查配置和任务日志")
 		return
 	}
@@ -137,6 +149,9 @@ func (rt *Router) issueCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if writeRedundantDomainError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "CERT_ISSUE_FAILED", "证书重新签发失败，请查看任务日志")
 		return
 	}

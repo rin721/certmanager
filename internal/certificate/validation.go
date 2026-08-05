@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// RedundantDomainError 表示 ACME 域名集合包含已被通配符覆盖的普通域名。
+type RedundantDomainError struct {
+	Domain   string
+	Wildcard string
+	Primary  bool
+}
+
+func (e *RedundantDomainError) Error() string {
+	if e.Primary {
+		return fmt.Sprintf("主域名 %q 已被通配符 %q 覆盖，请将主域名改为基础域名或删除通配符", e.Domain, e.Wildcard)
+	}
+	return fmt.Sprintf("SAN 域名 %q 已被通配符 %q 覆盖，请删除其中一个", e.Domain, e.Wildcard)
+}
+
 func NormalizeDomains(primary string, sans []string) (string, []string, error) {
 	primary = strings.ToLower(strings.TrimSpace(primary))
 	if err := ValidateDomain(primary, false); err != nil {
@@ -30,6 +44,38 @@ func NormalizeDomains(primary string, sans []string) (string, []string, error) {
 	}
 	sort.Strings(domains[1:])
 	return primary, domains, nil
+}
+
+// ValidateACMEDomains 拒绝 ACME CA 不接受的通配符冗余域名组合。
+func ValidateACMEDomains(primary string, domains []string) error {
+	wildcards := make([]string, 0)
+	for _, domain := range domains {
+		if strings.HasPrefix(domain, "*.") {
+			wildcards = append(wildcards, domain)
+		}
+	}
+	sort.Strings(wildcards)
+	for _, domain := range domains {
+		if strings.HasPrefix(domain, "*.") {
+			continue
+		}
+		for _, wildcard := range wildcards {
+			if wildcardCoversDomain(wildcard, domain) {
+				return &RedundantDomainError{Domain: domain, Wildcard: wildcard, Primary: domain == primary}
+			}
+		}
+	}
+	return nil
+}
+
+func wildcardCoversDomain(wildcard, domain string) bool {
+	baseDomain := strings.TrimPrefix(wildcard, "*.")
+	suffix := "." + baseDomain
+	if !strings.HasSuffix(domain, suffix) {
+		return false
+	}
+	leftmostLabel := strings.TrimSuffix(domain, suffix)
+	return leftmostLabel != "" && !strings.Contains(leftmostLabel, ".")
 }
 
 func ValidateDomain(domain string, allowWildcard bool) error {

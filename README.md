@@ -75,6 +75,8 @@ TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 
 ACME CA 可以选择 Let’s Encrypt 正式环境、Staging、ZeroSSL 或填写自定义 HTTPS Directory URL。自定义地址不得包含用户名、密码或 URL 片段；正式签发前建议先在 Staging 验证域名和 DNS 配置。
 
+申请通配符证书时推荐使用主域名 `example.com` 和 SAN `*.example.com`。不要再加入已被通配符覆盖的一级子域名（例如 `www.example.com`）；通配符不覆盖根域名或 `a.b.example.com` 这类多级子域名。
+
 创建后的证书详情页提供“重新签发”操作。它不会改变证书配置，使用现有域名、验证方式、DNS 凭据和 CA 设置重新生成并原子替换文件；签发中的、禁用的或已撤销的证书不会接受该操作。
 
 ## 8. 将证书映射给 Nginx
