@@ -20,10 +20,8 @@ CertMate 只需要一个应用容器，不使用 Docker Socket。SQLite、acme.s
 ### 2.1 Clone 仓库
 
 ```bash
-sudo mkdir -p /opt/certmate
-sudo chown "$(id -u):$(id -g)" /opt/certmate
-git clone <repo-addr> /opt/certmate
-cd /opt/certmate
+git clone <repo-addr> certmate
+cd certmate
 ```
 
 部署脚本位于仓库内，因此首次 clone 仍由用户执行，不使用不透明的远程 `curl | sh` 安装方式。
@@ -55,9 +53,9 @@ ADMIN_USERNAME=certadmin
 # 简单方式：自定义高强度密码。生产环境更推荐下面的 bcrypt 方式。
 ADMIN_PASSWORD='替换为你自己的高强度长密码'
 
-# 宿主机持久化目录，可使用绝对路径。
-DATA_HOST_DIR=/opt/certmate-data
-CERTS_HOST_DIR=/data/ssl
+# 默认映射到项目根目录下的相对目录。
+DATA_HOST_DIR=./data
+CERTS_HOST_DIR=./certs
 
 # 容器使用的宿主机 UID/GID，默认保持 10001。
 APP_UID=10001
@@ -129,9 +127,9 @@ Secret 只在对应内联值和 `*_FILE` 引用都为空时生成。以后重复
 容器默认以 `10001:10001` 运行。脚本不会自动调用 `sudo`；如果目录无法创建，或所有者、写入权限与 `APP_UID`/`APP_GID` 不一致，脚本会停止并输出包含实际路径的命令，例如：
 
 ```bash
-sudo mkdir -p -- /opt/certmate-data /data/ssl
-sudo chown -R -- 10001:10001 /opt/certmate-data /data/ssl
-sudo chmod u+rwx -- /opt/certmate-data /data/ssl
+sudo mkdir -p -- "$PWD/data" "$PWD/certs"
+sudo chown -R -- 10001:10001 "$PWD/data" "$PWD/certs"
+sudo chmod u+rwx -- "$PWD/data" "$PWD/certs"
 ```
 
 检查路径无误后执行提示命令，再重新运行：
@@ -198,27 +196,27 @@ Compose 推荐部署只维护仓库根目录的一份 `.env`：
 
 ## 5. 自定义证书输出目录
 
-例如：
+默认配置使用项目根目录下的相对目录：
 
 ```env
-CERTS_HOST_DIR=/data/ssl
+CERTS_HOST_DIR=./certs
 ```
 
 Compose 始终挂载为：
 
 ```text
-/data/ssl:/certs
+<项目根目录>/certs:/certs
 ```
 
 假设证书安全目录名为 `example-com`，宿主机文件为：
 
 ```text
-/data/ssl/example-com/cert.pem
-/data/ssl/example-com/chain.pem
-/data/ssl/example-com/fullchain.pem
-/data/ssl/example-com/privkey.pem
-/data/ssl/example-com/metadata.json
-/data/ssl/example-com/.renewed
+./certs/example-com/cert.pem
+./certs/example-com/chain.pem
+./certs/example-com/fullchain.pem
+./certs/example-com/privkey.pem
+./certs/example-com/metadata.json
+./certs/example-com/.renewed
 ```
 
 其他业务容器只读挂载宿主机目录，不要挂载 CertMate 的 `/data/acme` 内部目录：
@@ -227,7 +225,7 @@ Compose 始终挂载为：
 services:
   nginx:
     volumes:
-      - /data/ssl:/etc/nginx/certs:ro
+      - ./certs:/etc/nginx/certs:ro
 ```
 
 ## 6. 配置生效边界
@@ -255,8 +253,8 @@ docker run -d \
   --user 10001:10001 \
   --env-file ./.env \
   -p 8080:8080 \
-  -v /opt/certmate-data:/data \
-  -v /data/ssl:/certs \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/certs:/certs" \
   --read-only \
   --tmpfs /tmp:size=64m,mode=1770,uid=10001,gid=10001 \
   --security-opt no-new-privileges:true \

@@ -28,8 +28,8 @@ CertMate 不是企业 PKI、密钥托管服务或多租户证书平台。第一�
 Linux 主机安装 Git、Bash、OpenSSL、Docker Engine 和 Docker Compose v2 后，使用两阶段部署脚本：
 
 ```bash
-git clone <repo-addr> /opt/certmate
-cd /opt/certmate
+git clone <repo-addr> certmate
+cd certmate
 
 # 第一次只创建 .env 并停止。
 bash scripts/deploy.sh init
@@ -82,7 +82,7 @@ ACME CA 可以选择 Let’s Encrypt 正式环境、Staging、ZeroSSL 或填写�
 services:
   nginx:
     volumes:
-      - /data/ssl:/etc/nginx/certs:ro
+      - ./certs:/etc/nginx/certs:ro
 ```
 
 ```nginx
@@ -98,7 +98,7 @@ ssl_certificate_key /etc/nginx/certs/example-com/privkey.pem;
 services:
   stalwart:
     volumes:
-      - /data/ssl/example-com:/opt/stalwart/certs:ro
+      - ./certs/example-com:/opt/stalwart/certs:ro
 ```
 
 在 Stalwart 配置中引用 `/opt/stalwart/certs/fullchain.pem` 和 `/opt/stalwart/certs/privkey.pem`。更新后的重载方式以你所用 Stalwart 版本的官方文档为准。
@@ -114,7 +114,7 @@ ACME 到期判断与协议由 acme.sh 负责；CertMate 按证书策略启动普
 启用标记后，每次成功发布会写入：
 
 ```text
-/data/ssl/example-com/.renewed
+./certs/example-com/.renewed
 ```
 
 文件内容是 UTC RFC3339 时间。外部服务可轮询文件 mtime 或内容变化后自行验证配置并重载。不要让 CertMate 执行任意 Hook，也不要为此挂载 Docker Socket。
