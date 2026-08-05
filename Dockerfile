@@ -25,7 +25,7 @@ COPY . .
 COPY --from=frontend-builder /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/certmate ./cmd/server
 
-FROM alpine:3.23 AS acmesh
+FROM alpine:3.24 AS acmesh
 ARG ACME_SH_VERSION=3.1.4
 ARG ACME_SH_SHA256=e5f8e187bbf5251e0cd8891f2622daab9850366bd17bea9f92c2fe2ee091fd32
 RUN wget -qO /tmp/acme.tar.gz "https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACME_SH_VERSION}.tar.gz" \
@@ -34,7 +34,7 @@ RUN wget -qO /tmp/acme.tar.gz "https://github.com/acmesh-official/acme.sh/archiv
     && tar -xzf /tmp/acme.tar.gz --strip-components=1 -C /opt/acme.sh \
     && rm /tmp/acme.tar.gz
 
-FROM alpine:3.23 AS runtime
+FROM alpine:3.24 AS runtime
 RUN apk add --no-cache ca-certificates openssl tzdata curl socat \
     && addgroup -S -g 10001 certmate \
     && adduser -S -D -H -u 10001 -G certmate certmate \
