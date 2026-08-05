@@ -20,7 +20,7 @@
 
 ## Docker 配置边界
 
-Dockerfile 的 `VERSION`、`ACME_SH_VERSION` 和校验值属于构建期参数，不得用于传递密码、Token、Session Secret 或应用加密密钥。运行时配置应通过受保护的 `--env-file`、Compose `.env` 或 `*_FILE` Secret 文件注入。
+Dockerfile 的 `VERSION`、`ACME_SH_VERSION` 和校验值属于构建期参数，不得用于传递密码、Token、Session Secret 或应用加密密钥。推荐使用 [Docker 部署手册](docs/deployment.md) 中的两阶段脚本生成并保护 Compose `.env`；高级环境可以改用受控的 `*_FILE` Secret 文件。不要在命令行参数、Shell 历史或构建参数中传递 Secret。
 
 修改端口、目录、管理员账户、Session/加密密钥、可信代理和功能开关后，必须重新创建容器；仅重启进程不会可靠地替换容器环境。修改 `APP_ENCRYPTION_KEY` 前必须备份 `/data`，因为旧 DNS 凭据可能无法再解密。
 

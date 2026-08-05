@@ -1,7 +1,7 @@
 GO ?= go
 NPM ?= npm
 
-.PHONY: dev frontend-dev backend-dev build test test-e2e lint verify vuln license docker-build docker-up docker-down clean
+.PHONY: dev frontend-dev backend-dev build test test-e2e deploy-test lint verify vuln license docker-build docker-up docker-down clean
 
 dev:
 	@echo "请在两个终端分别运行 make backend-dev 和 make frontend-dev"
@@ -23,6 +23,11 @@ test:
 test-e2e:
 	cd web && $(NPM) run build && $(NPM) run test:e2e
 
+deploy-test:
+	bash -n scripts/deploy.sh
+	bash -n scripts/deploy_test.sh
+	bash scripts/deploy_test.sh
+
 lint:
 	$(GO) vet ./...
 	cd web && $(NPM) run lint
@@ -30,6 +35,7 @@ lint:
 verify:
 	$(GO) test ./...
 	$(GO) vet ./...
+	$(MAKE) deploy-test
 	cd web && $(NPM) run lint
 	cd web && $(NPM) run test
 	cd web && $(NPM) run build
