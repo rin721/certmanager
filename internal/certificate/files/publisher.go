@@ -44,6 +44,12 @@ type Payload struct {
 	CreateMarker  bool
 }
 
+// BackupResult 描述删除前备份是否实际处理了已发布目录。
+type BackupResult struct {
+	DirectoryExisted bool
+	BackupCreated    bool
+}
+
 func NewPublisher(root, backupDir string) *Publisher {
 	return &Publisher{root: filepath.Clean(root), backupDir: filepath.Clean(backupDir), now: time.Now}
 }
@@ -158,32 +164,75 @@ func (p *Publisher) Read(safeName, fileName string) ([]byte, os.FileMode, error)
 	return value, mode, err
 }
 
-func (p *Publisher) Backup(safeName string) (string, error) {
+func (p *Publisher) Backup(safeName string) (BackupResult, error) {
 	if err := ValidateSafeDirectory(safeName); err != nil {
-		return "", err
+		return BackupResult{}, err
 	}
 	if err := ensureRoot(p.root); err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(p.backupDir, 0o750); err != nil {
-		return "", err
+		return BackupResult{}, err
 	}
 	target := filepath.Join(p.root, safeName)
 	if err := validateTarget(p.root, target); err != nil {
-		return "", err
+		return BackupResult{}, err
 	}
 	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return BackupResult{}, nil
+	}
 	if err != nil {
-		return "", err
+		return BackupResult{}, err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("证书输出目标不是安全目录")
+		return BackupResult{}, errors.New("证书输出目标不是安全目录")
+	}
+	if err := os.MkdirAll(p.backupDir, 0o750); err != nil {
+		return BackupResult{DirectoryExisted: true}, err
 	}
 	backupTarget := filepath.Join(p.backupDir, safeName+"-deleted-"+p.now().UTC().Format("20060102T150405.000000000Z"))
 	if err := copyManagedDirectory(target, backupTarget); err != nil {
-		return "", err
+		return BackupResult{DirectoryExisted: true}, err
 	}
-	return backupTarget, nil
+	return BackupResult{DirectoryExisted: true, BackupCreated: true}, nil
+}
+
+// Available 返回受管目录中实际存在且安全的证书文件。
+func (p *Publisher) Available(safeName string) (map[string]bool, error) {
+	if err := ValidateSafeDirectory(safeName); err != nil {
+		return nil, err
+	}
+	if err := ensureRoot(p.root); err != nil {
+		return nil, err
+	}
+	target := filepath.Join(p.root, safeName)
+	if err := validateTarget(p.root, target); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("证书输出目标不是安全目录")
+	}
+
+	available := make(map[string]bool, len(allowedFiles))
+	for name := range allowedFiles {
+		fileInfo, statErr := os.Lstat(filepath.Join(target, name))
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !fileInfo.Mode().IsRegular() || fileInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("证书文件 %s 不是普通文件", name)
+		}
+		available[name] = true
+	}
+	return available, nil
 }
 
 func (p *Publisher) Remove(safeName string) error {

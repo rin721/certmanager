@@ -20,8 +20,10 @@ import (
 )
 
 var (
-	ErrNotFound         = errors.New("certificate not found")
-	ErrOperationRunning = errors.New("certificate operation already running")
+	ErrNotFound          = errors.New("certificate not found")
+	ErrOperationRunning  = errors.New("certificate operation already running")
+	ErrRevokeNotAllowed  = errors.New("certificate revoke not allowed")
+	ErrDeleteFilesBackup = errors.New("certificate files backup failed")
 )
 
 type CreateSelfSignedRequest struct {
@@ -79,7 +81,7 @@ type Repository interface {
 	MarkCertificateRenewed(context.Context, Certificate) error
 	SetCertificateStatus(context.Context, string, Status) error
 	UpdateCertificateSettings(context.Context, string, string, bool, int, bool) error
-	DeleteCertificate(context.Context, string) error
+	DeleteCertificateWithAudit(context.Context, string, *audit.Event) error
 	CreateJob(context.Context, *jobs.Run) error
 	FinishJob(context.Context, string, string, int, string, string) error
 	CreateAuditEvent(context.Context, *audit.Event) error
@@ -111,8 +113,8 @@ func (s *Service) Revoke(ctx context.Context, id, actor, clientIP string) (Certi
 	if err != nil {
 		return Certificate{}, err
 	}
-	if value.Mode != ModeACME {
-		return Certificate{}, errors.New("本地自签名证书不能通过 CA 撤销")
+	if value.Mode != ModeACME || !revokeAllowed(value.Status) {
+		return Certificate{}, ErrRevokeNotAllowed
 	}
 	if s.acme == nil {
 		return Certificate{}, errors.New("ACME 功能未启用")
@@ -151,13 +153,27 @@ func (s *Service) Delete(ctx context.Context, id string, deleteFiles bool, actor
 		return ErrOperationRunning
 	}
 	defer lock.Unlock()
+	backupResult := certfiles.BackupResult{}
 	if deleteFiles {
-		if _, err := s.publisher.Backup(value.OutputDirectory); err != nil {
-			return err
+		backupResult, err = s.publisher.Backup(value.OutputDirectory)
+		if err != nil {
+			auditErr := s.audit(ctx, id, "certificate.delete", actor, clientIP, "failed", map[string]any{
+				"certificate_id": id, "certificate_name": value.Name, "certificate_status": value.Status,
+				"delete_files": true, "files_checked": true,
+				"files_existed": backupResult.DirectoryExisted, "backup_created": false,
+			})
+			return errors.Join(fmt.Errorf("%w: %w", ErrDeleteFilesBackup, err), auditErr)
 		}
 	}
-	_ = s.audit(ctx, id, "certificate.delete", actor, clientIP, "succeeded", map[string]any{"delete_files": deleteFiles, "certificate_id": id})
-	if err := s.store.DeleteCertificate(ctx, id); err != nil {
+	event := &audit.Event{
+		CertificateID: id, EventType: "certificate.delete", Actor: actor, ClientIP: clientIP, Result: "succeeded",
+		Detail: map[string]any{
+			"certificate_id": id, "certificate_name": value.Name, "certificate_status": value.Status,
+			"delete_files": deleteFiles, "files_checked": deleteFiles, "files_existed": backupResult.DirectoryExisted,
+			"backup_created": backupResult.BackupCreated,
+		},
+	}
+	if err := s.store.DeleteCertificateWithAudit(ctx, id, event); err != nil {
 		return err
 	}
 	if deleteFiles {
@@ -169,6 +185,14 @@ func (s *Service) Delete(ctx context.Context, id string, deleteFiles bool, actor
 	return nil
 }
 
+func revokeAllowed(status Status) bool {
+	return status == StatusActive || status == StatusExpiring
+}
+
+func renewAllowed(status Status) bool {
+	return status == StatusActive || status == StatusExpiring || status == StatusExpired
+}
+
 func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clientIP string) (Certificate, error) {
 	jobType, eventType := "renew", "certificate.renew"
 	if force {
@@ -177,10 +201,8 @@ func (s *Service) Renew(ctx context.Context, id string, force bool, actor, clien
 	return s.issueExisting(ctx, id, force, jobType, eventType, actor, clientIP)
 }
 
-// Issue manually re-issues an existing certificate while preserving the
-// create-immediately contract. It is intended for failed, expired, or
-// explicitly requested refreshes and shares the same locking and publishing
-// path as renewal.
+// Issue 使用原配置人工重新签发证书，并保持创建即签发的既有契约。
+// 失败重试和主动刷新共用相同的证书锁、任务记录与原子发布流程。
 func (s *Service) Issue(ctx context.Context, id, actor, clientIP string) (Certificate, error) {
 	value, err := s.Get(ctx, id)
 	if err != nil {
@@ -218,7 +240,7 @@ func (s *Service) issueExisting(ctx context.Context, id string, force bool, jobT
 		}
 		return s.issueExistingCertificate(ctx, value, actor, clientIP)
 	}
-	if value.Status == StatusRevoked || value.Status == StatusDisabled {
+	if !renewAllowed(value.Status) {
 		return Certificate{}, errors.New("当前证书状态不允许续签")
 	}
 	if err := s.store.SetCertificateStatus(ctx, id, StatusRenewing); err != nil {
@@ -662,6 +684,14 @@ func (s *Service) ReadFile(ctx context.Context, id, fileName string) ([]byte, er
 	}
 	content, _, err := s.publisher.Read(value.OutputDirectory, fileName)
 	return content, err
+}
+
+func (s *Service) AvailableFiles(ctx context.Context, id string) (map[string]bool, error) {
+	value, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.publisher.Available(value.OutputDirectory)
 }
 
 func (s *Service) AuditFileAccess(ctx context.Context, id, eventType, actor, clientIP string) error {

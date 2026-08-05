@@ -36,7 +36,7 @@ import {
   Typography,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom'
 import { z } from 'zod'
@@ -258,14 +258,25 @@ export function CertificateDetailPage() {
 	const [deletePassword, setDeletePassword] = useState('')
 	const [deleteName, setDeleteName] = useState('')
 	const [deleteFiles, setDeleteFiles] = useState(false)
+	const forceTriggerRef = useRef<HTMLButtonElement>(null)
+	const revokeTriggerRef = useRef<HTMLButtonElement>(null)
+	const deleteTriggerRef = useRef<HTMLButtonElement>(null)
   const query = useQuery({ queryKey: ['certificate', id], queryFn: () => getCertificate(id), enabled: Boolean(id) })
+	const availableFiles = useQuery({ queryKey: ['certificate-files', id], queryFn: () => listCertificateFiles(id), enabled: Boolean(id) })
+	const restoreFocus = (trigger: React.RefObject<HTMLButtonElement | null>) => {
+		if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+		window.setTimeout(() => trigger.current?.focus(), 0)
+	}
+	const closeForceDialog = () => { restoreFocus(forceTriggerRef); setForceOpen(false); setForcePassword('') }
+	const closeRevokeDialog = () => { restoreFocus(revokeTriggerRef); setRevokeOpen(false); setRevokePassword('') }
+	const closeDeleteDialog = () => { restoreFocus(deleteTriggerRef); setDeleteOpen(false); setDeletePassword(''); setDeleteName(''); setDeleteFiles(false) }
   const renew = useMutation({
     mutationFn: () => renewCertificate(id),
     onSuccess: (value) => { queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
   })
   const forceRenew = useMutation({
     mutationFn: async () => { await reauthenticate(forcePassword); return renewCertificate(id, true) },
-    onSuccess: (value) => { setForcePassword(''); setForceOpen(false); queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
+    onSuccess: (value) => { closeForceDialog(); queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
   })
 	const issue = useMutation({
 	  mutationFn: () => issueCertificate(id),
@@ -273,20 +284,24 @@ export function CertificateDetailPage() {
 	})
 	const revoke = useMutation({
 	  mutationFn: () => revokeCertificate(id, revokePassword),
-	  onSuccess: (value) => { setRevokePassword(''); setRevokeOpen(false); queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
+	  onSuccess: (value) => { closeRevokeDialog(); queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) },
 	})
 	const remove = useMutation({
-	  mutationFn: () => deleteCertificate(id, deletePassword, deleteName, deleteFiles),
-	  onSuccess: async () => { setDeletePassword(''); setDeleteName(''); setDeleteOpen(false); await queryClient.invalidateQueries({ queryKey: ['certificates'] }); await navigate('/certificates', { replace: true }) },
+	  mutationFn: () => deleteCertificate(id, deletePassword, deleteName, deleteFiles && (availableFiles.data?.length ?? 0) > 0),
+	  onSuccess: async () => { closeDeleteDialog(); await queryClient.invalidateQueries({ queryKey: ['certificates'] }); await navigate('/certificates', { replace: true }) },
 	})
   if (query.isPending) return <Typography>正在加载证书…</Typography>
   if (query.isError) return <Alert severity="error">证书不存在或读取失败。</Alert>
   const certificate = query.data
 	const canIssue = ['pending', 'failed', 'active', 'expiring', 'expired'].includes(certificate.status)
+	const canRenew = ['active', 'expiring', 'expired'].includes(certificate.status)
+	const canRevoke = certificate.mode === 'acme' && ['active', 'expiring'].includes(certificate.status)
+	const hasPublishedFiles = (availableFiles.data?.length ?? 0) > 0
 	const operationError = issue.error ?? renew.error ?? forceRenew.error ?? revoke.error ?? remove.error
   return (
     <Stack spacing={3}>
-      <Stack direction={{ xs: 'column', md: 'row' }} sx={{ justifyContent: 'space-between', gap: 2 }}><Box><Typography variant="h4">{certificate.name}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1 }}><StatusChip status={certificate.status} /><Chip label={certificate.mode === 'acme' ? '公共 CA 证书' : '本地自签名证书'} variant="outlined" /></Stack></Box><Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}><Button startIcon={<AutorenewOutlinedIcon />} variant="outlined" disabled={renew.isPending} onClick={() => renew.mutate()}>手动续签</Button><Button variant="outlined" disabled={!canIssue || issue.isPending} onClick={() => issue.mutate()}>{issue.isPending ? '正在签发…' : certificate.status === 'failed' ? '重试签发' : '重新签发'}</Button><Button color="warning" disabled={forceRenew.isPending} onClick={() => setForceOpen(true)}>强制续签</Button>{certificate.mode === 'acme' && <Button color="warning" onClick={() => setRevokeOpen(true)}>撤销</Button>}<Button color="error" onClick={() => setDeleteOpen(true)}>删除</Button></Stack></Stack>
+      <Stack direction={{ xs: 'column', md: 'row' }} sx={{ justifyContent: 'space-between', gap: 2 }}><Box><Typography variant="h4">{certificate.name}</Typography><Stack direction="row" spacing={1} sx={{ mt: 1 }}><StatusChip status={certificate.status} /><Chip label={certificate.mode === 'acme' ? '公共 CA 证书' : '本地自签名证书'} variant="outlined" /></Stack></Box><Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>{canRenew && <Button startIcon={<AutorenewOutlinedIcon />} variant="outlined" disabled={renew.isPending} onClick={() => renew.mutate()}>手动续签</Button>}{canIssue && <Button variant="outlined" disabled={issue.isPending} onClick={() => issue.mutate()}>{issue.isPending ? '正在签发…' : certificate.status === 'failed' ? '重试签发' : certificate.status === 'pending' ? '签发' : '重新签发'}</Button>}{canRenew && <Button ref={forceTriggerRef} color="warning" disabled={forceRenew.isPending} onClick={() => setForceOpen(true)}>强制续签</Button>}{canRevoke && <Button ref={revokeTriggerRef} color="warning" onClick={() => setRevokeOpen(true)}>撤销</Button>}<Button ref={deleteTriggerRef} color="error" onClick={() => setDeleteOpen(true)}>{certificate.status === 'failed' ? '删除失败记录' : '删除'}</Button></Stack></Stack>
+	  {certificate.status === 'failed' && <Alert severity="warning">failed 表示这条管理记录未能完成签发，并不代表存在可撤销的证书。你可以修正配置后重试，或删除失败记录；任务和审计历史会保留。</Alert>}
       {operationError && <Alert severity="error">{operationError instanceof ApiError ? operationError.message : '操作失败，请检查确认信息并查看任务日志。'}</Alert>}
       <Paper variant="outlined"><Tabs value={tab} onChange={(_, value: number) => setTab(value)} variant="scrollable"><Tab label="概览" /><Tab label="域名" /><Tab label="证书文件" /><Tab label="自动续签" /><Tab label="任务历史" /><Tab label="审计记录" /></Tabs></Paper>
       {tab === 0 && <Overview certificate={certificate} />}
@@ -295,9 +310,9 @@ export function CertificateDetailPage() {
       {tab === 3 && <RenewalSettings certificate={certificate} onUpdated={(value) => { queryClient.setQueryData(['certificate', id], value); void queryClient.invalidateQueries({ queryKey: ['certificates'] }) }} />}
 	  {tab === 4 && <CertificateJobs certificateId={certificate.id} />}
 	  {tab === 5 && <CertificateAudits certificateId={certificate.id} />}
-      <Dialog open={forceOpen} onClose={() => { setForceOpen(false); setForcePassword('') }}><DialogTitle>确认强制续签</DialogTitle><DialogContent><Alert severity="warning" sx={{ mb: 2 }}>强制续签可能触发 CA 速率限制。普通自动任务永远不会使用 --force。</Alert><TextField label="管理员密码" type="password" fullWidth value={forcePassword} onChange={(event) => setForcePassword(event.target.value)} /></DialogContent><DialogActions><Button onClick={() => { setForceOpen(false); setForcePassword('') }}>取消</Button><Button color="warning" variant="contained" disabled={!forcePassword || forceRenew.isPending} onClick={() => forceRenew.mutate()}>确认强制续签</Button></DialogActions></Dialog>
-	  <Dialog open={revokeOpen} onClose={() => { setRevokeOpen(false); setRevokePassword('') }}><DialogTitle>确认撤销公共证书</DialogTitle><DialogContent><Alert severity="warning" sx={{ mb: 2 }}>撤销会通知 CA 将证书标记为不再可信，无法撤销此操作。</Alert><TextField label="管理员密码" type="password" autoComplete="current-password" fullWidth value={revokePassword} onChange={(event) => setRevokePassword(event.target.value)} /></DialogContent><DialogActions><Button onClick={() => { setRevokeOpen(false); setRevokePassword('') }}>取消</Button><Button color="warning" variant="contained" disabled={!revokePassword || revoke.isPending} onClick={() => revoke.mutate()}>确认撤销</Button></DialogActions></Dialog>
-	  <Dialog open={deleteOpen} onClose={() => { setDeleteOpen(false); setDeletePassword(''); setDeleteName('') }}><DialogTitle>删除证书</DialogTitle><DialogContent><Alert severity="error" sx={{ mb: 2 }}>删除管理记录不可撤销。选择删除文件时，系统会先保存短期备份。</Alert><Stack spacing={2}><TextField label={`输入证书名称 ${certificate.name} 以确认`} value={deleteName} onChange={(event) => setDeleteName(event.target.value)} /><TextField label="管理员密码" type="password" autoComplete="current-password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} /><FormControlLabel control={<Checkbox checked={deleteFiles} onChange={(event) => setDeleteFiles(event.target.checked)} />} label="同时删除证书文件（先创建备份）" /></Stack></DialogContent><DialogActions><Button onClick={() => { setDeleteOpen(false); setDeletePassword(''); setDeleteName('') }}>取消</Button><Button color="error" variant="contained" disabled={deleteName !== certificate.name || !deletePassword || remove.isPending} onClick={() => remove.mutate()}>确认删除</Button></DialogActions></Dialog>
+      <Dialog open={forceOpen} onClose={closeForceDialog}><DialogTitle>确认强制续签</DialogTitle><DialogContent><Alert severity="warning" sx={{ mb: 2 }}>强制续签可能触发 CA 速率限制。普通自动任务永远不会使用 --force。</Alert><TextField label="管理员密码" type="password" fullWidth value={forcePassword} onChange={(event) => setForcePassword(event.target.value)} /></DialogContent><DialogActions><Button onClick={closeForceDialog}>取消</Button><Button color="warning" variant="contained" disabled={!forcePassword || forceRenew.isPending} onClick={() => forceRenew.mutate()}>确认强制续签</Button></DialogActions></Dialog>
+	  <Dialog open={revokeOpen} onClose={closeRevokeDialog}><DialogTitle>确认撤销公共证书</DialogTitle><DialogContent><Alert severity="warning" sx={{ mb: 2 }}>撤销会通知 CA 将证书标记为不再可信，无法撤销此操作。</Alert><TextField label="管理员密码" type="password" autoComplete="current-password" fullWidth value={revokePassword} onChange={(event) => setRevokePassword(event.target.value)} /></DialogContent><DialogActions><Button onClick={closeRevokeDialog}>取消</Button><Button color="warning" variant="contained" disabled={!revokePassword || revoke.isPending} onClick={() => revoke.mutate()}>确认撤销</Button></DialogActions></Dialog>
+	  <Dialog open={deleteOpen} onClose={closeDeleteDialog}><DialogTitle>{certificate.status === 'failed' ? '删除失败记录' : '删除证书'}</DialogTitle><DialogContent><Alert severity="error" sx={{ mb: 2 }}>{certificate.status === 'failed' ? '这会删除未签发成功的管理记录，但保留任务和审计历史。' : '删除管理记录不可撤销。选择删除文件时，系统会先保存短期备份。'}</Alert><Stack spacing={2}><TextField label={`输入证书名称 ${certificate.name} 以确认`} value={deleteName} onChange={(event) => setDeleteName(event.target.value)} /><TextField label="管理员密码" type="password" autoComplete="current-password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} /><FormControlLabel control={<Checkbox checked={deleteFiles && hasPublishedFiles} disabled={!hasPublishedFiles || availableFiles.isPending || availableFiles.isError} onChange={(event) => setDeleteFiles(event.target.checked)} />} label={hasPublishedFiles ? '同时删除证书文件（先创建备份）' : availableFiles.isPending ? '正在检查已发布文件…' : availableFiles.isError ? '无法检查证书文件，只删除管理记录' : '没有已发布的证书文件，只删除管理记录'} /></Stack></DialogContent><DialogActions><Button onClick={closeDeleteDialog}>取消</Button><Button color="error" variant="contained" disabled={deleteName !== certificate.name || !deletePassword || remove.isPending} onClick={() => remove.mutate()}>确认删除</Button></DialogActions></Dialog>
     </Stack>
   )
 }
@@ -340,7 +355,7 @@ function CertificateFiles({ certificate }: { certificate: Certificate }) {
   const load = useMutation({
     mutationFn: (file: CertificateFile) => getCertificateFile(certificate.id, file.type),
     onSuccess: (value, file) => { setSelected(file); setContent(value); setError('') },
-    onError: () => setError('读取证书文件失败。'),
+    onError: (requestError) => setError(apiErrorMessage(requestError, '读取证书文件失败。')),
   })
   const reveal = useMutation({
     mutationFn: () => revealPrivateKey(certificate.id, password),
@@ -348,12 +363,12 @@ function CertificateFiles({ certificate }: { certificate: Certificate }) {
       const file = files.data?.find((item) => item.private) ?? null
       setSelected(file); setContent(value); setPassword(''); setPasswordOpen(false); setError('')
     },
-    onError: () => setError('管理员密码错误或重新认证失败。'),
+    onError: (requestError) => setError(apiErrorMessage(requestError, '管理员密码错误或重新认证失败。')),
   })
   const archive = useMutation({
     mutationFn: (includePrivateKey: boolean) => downloadCertificateArchive(certificate.id, includePrivateKey, includePrivateKey ? password : ''),
     onSuccess: () => { setPassword(''); setArchivePasswordOpen(false); setError('') },
-    onError: () => setError('压缩包下载失败或管理员密码错误。'),
+    onError: (requestError) => setError(apiErrorMessage(requestError, '压缩包下载失败或管理员密码错误。')),
   })
   useEffect(() => () => { setContent(''); setPassword('') }, [])
   useEffect(() => {
@@ -364,19 +379,29 @@ function CertificateFiles({ certificate }: { certificate: Certificate }) {
     return undefined
   }, [content, selected])
   const closeViewer = () => { setContent(''); setSelected(null) }
+	const hasPublicBundle = ['cert', 'chain', 'fullchain'].every((type) => files.data?.some((file) => file.type === type))
+	const hasPrivateKey = files.data?.some((file) => file.private) ?? false
   return (
     <Stack spacing={2}>
       {error && <Alert severity="error">{error}</Alert>}
       <Alert severity="info">容器内目录为 /certs/{certificate.output_directory}；宿主机路径为 compose 中 CERTS_HOST_DIR 对应目录下的 {certificate.output_directory}。其他容器应只读挂载该宿主机目录。</Alert>
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}><Button variant="outlined" startIcon={<DownloadOutlinedIcon />} disabled={archive.isPending} onClick={() => archive.mutate(false)}>下载 ZIP（不含私钥）</Button><Button color="warning" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => setArchivePasswordOpen(true)}>下载 ZIP（含私钥）</Button></Stack>
-       <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}><Table sx={{ minWidth: 640 }}><TableHead><TableRow><TableCell>文件</TableCell><TableCell>容器内路径</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
+	  {files.isPending && <Typography color="text.secondary">正在检查证书文件…</Typography>}
+	  {files.isError && <Alert severity="error">无法读取证书文件列表。</Alert>}
+	  {files.isSuccess && files.data.length === 0 && <Alert severity="info">当前记录没有已发布的证书文件。首次签发失败时这是正常状态。</Alert>}
+	  {files.isSuccess && files.data.length > 0 && <>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}><Button variant="outlined" startIcon={<DownloadOutlinedIcon />} disabled={!hasPublicBundle || archive.isPending} onClick={() => archive.mutate(false)}>下载 ZIP（不含私钥）</Button><Button color="warning" variant="outlined" startIcon={<DownloadOutlinedIcon />} disabled={!hasPublicBundle || !hasPrivateKey} onClick={() => setArchivePasswordOpen(true)}>下载 ZIP（含私钥）</Button></Stack>
+      <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto' }}><Table sx={{ minWidth: 640 }}><TableHead><TableRow><TableCell>文件</TableCell><TableCell>容器内路径</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
         {files.data?.map((file) => <TableRow key={file.type}><TableCell>{file.filename}{file.private && <Chip label="高风险" color="warning" size="small" sx={{ ml: 1 }} />}</TableCell><TableCell component="code">{file.container_path}</TableCell><TableCell align="right"><Button startIcon={<VisibilityOutlinedIcon />} onClick={() => file.private ? setPasswordOpen(true) : load.mutate(file)}>查看</Button><Button component="a" href={certificateDownloadURL(certificate.id, file.type)} startIcon={<DownloadOutlinedIcon />} disabled={file.private && selected?.type !== 'private-key'}>下载</Button></TableCell></TableRow>)}
-      </TableBody></Table></TableContainer>
+      </TableBody></Table></TableContainer></>}
       <Dialog open={Boolean(selected && content)} onClose={closeViewer} maxWidth="md" fullWidth><DialogTitle>{selected?.filename}</DialogTitle><DialogContent><Alert severity={selected?.private ? 'warning' : 'info'} sx={{ mb: 2 }}>{selected?.private ? '私钥属于高敏感信息。关闭窗口或离开页面后将立即从前端内存清除。' : '证书内容可以安全复制给需要使用它的服务。'}</Alert><Box component="pre" sx={{ bgcolor: 'grey.950', color: 'grey.100', p: 2, borderRadius: 1, maxHeight: '50vh', overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{content}</Box></DialogContent><DialogActions><Button startIcon={<ContentCopyOutlinedIcon />} onClick={async () => { await copyText(content); if (selected?.private) await auditPrivateKeyCopy(certificate.id) }}>复制</Button><Button onClick={closeViewer}>关闭</Button></DialogActions></Dialog>
       <Dialog open={passwordOpen} onClose={() => { setPassword(''); setPasswordOpen(false) }}><DialogTitle>重新认证以查看私钥</DialogTitle><DialogContent><Alert severity="warning" sx={{ mb: 2 }}>私钥一旦泄露，证书保护的服务将不再安全。此操作会被审计。</Alert><TextField label="管理员密码" type="password" autoComplete="current-password" fullWidth value={password} onChange={(event) => setPassword(event.target.value)} /></DialogContent><DialogActions><Button onClick={() => { setPassword(''); setPasswordOpen(false) }}>取消</Button><Button variant="contained" color="warning" disabled={!password || reveal.isPending} onClick={() => reveal.mutate()}>确认查看</Button></DialogActions></Dialog>
       <Dialog open={archivePasswordOpen} onClose={() => { setPassword(''); setArchivePasswordOpen(false) }}><DialogTitle>下载包含私钥的 ZIP</DialogTitle><DialogContent><Alert severity="warning" sx={{ mb: 2 }}>压缩包包含未加密的 privkey.pem。请仅保存到受控设备并限制文件权限；此操作会被审计。</Alert><TextField label="管理员密码" type="password" autoComplete="current-password" fullWidth value={password} onChange={(event) => setPassword(event.target.value)} /></DialogContent><DialogActions><Button onClick={() => { setPassword(''); setArchivePasswordOpen(false) }}>取消</Button><Button variant="contained" color="warning" disabled={!password || archive.isPending} onClick={() => archive.mutate(true)}>确认下载</Button></DialogActions></Dialog>
     </Stack>
   )
+}
+
+function apiErrorMessage(error: unknown, fallback: string) {
+	return error instanceof ApiError ? error.message : fallback
 }
 
 function StatusChip({ status }: { status: string }) {

@@ -136,6 +136,62 @@ test('旧失败证书重试时显示通配符冗余错误', async () => {
   expect(await screen.findByText(message)).toBeInTheDocument()
 })
 
+test('失败证书只提供重试和删除且无文件时仅删除管理记录', async () => {
+	const requests: Array<{ method: string; url: string; body?: string }> = []
+	const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input)
+		requests.push({ method: init?.method ?? 'GET', url, body: init?.body as string | undefined })
+		if (url.endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+		if (url.endsWith('/files')) return new Response(JSON.stringify({ items: [] }), { status: 200 })
+		if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+		return new Response(JSON.stringify({ ...certificateFixture, name: '失败记录', mode: 'acme', status: 'failed' }), { status: 200 })
+	}))
+	renderWithClient(<Routes><Route path="/certificates/:id" element={<CertificateDetailPage />} /><Route path="/certificates" element={<div>证书列表</div>} /></Routes>, '/certificates/cert-1')
+
+	expect(await screen.findByRole('button', { name: '重试签发' })).toBeInTheDocument()
+	expect(screen.getByRole('button', { name: '删除失败记录' })).toBeInTheDocument()
+	expect(screen.queryByRole('button', { name: '手动续签' })).not.toBeInTheDocument()
+	expect(screen.queryByRole('button', { name: '强制续签' })).not.toBeInTheDocument()
+	expect(screen.queryByRole('button', { name: '撤销' })).not.toBeInTheDocument()
+	expect(screen.getByText(/failed 表示这条管理记录未能完成签发/)).toBeInTheDocument()
+
+	fireEvent.click(screen.getByRole('tab', { name: '证书文件' }))
+	expect(await screen.findByText('当前记录没有已发布的证书文件。首次签发失败时这是正常状态。')).toBeInTheDocument()
+	expect(screen.queryByRole('link', { name: '下载' })).not.toBeInTheDocument()
+
+	fireEvent.click(screen.getByRole('button', { name: '删除失败记录' }))
+	const deleteFilesCheckbox = await screen.findByRole('checkbox', { name: '没有已发布的证书文件，只删除管理记录' })
+	expect(deleteFilesCheckbox).toBeDisabled()
+	fireEvent.change(screen.getByLabelText('输入证书名称 失败记录 以确认'), { target: { value: '失败记录' } })
+	fireEvent.change(screen.getByLabelText('管理员密码'), { target: { value: 'correct-password' } })
+	fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
+	expect(await screen.findByText('证书列表')).toBeInTheDocument()
+	const deleteRequest = requests.find((request) => request.method === 'DELETE')
+	expect(deleteRequest).toBeDefined()
+	expect(JSON.parse(deleteRequest?.body ?? '{}')).toMatchObject({ delete_files: false, confirm_name: '失败记录' })
+	await waitFor(() => expect(consoleError.mock.calls.flat().join(' ')).not.toContain('Blocked aria-hidden'))
+})
+
+test('删除文件备份失败时显示后端安全提示', async () => {
+	const message = '证书文件备份失败，管理记录未删除'
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input)
+		if (url.endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+		if (url.endsWith('/files')) return new Response(JSON.stringify({ items: [{ type: 'cert', filename: 'cert.pem', private: false, container_path: '/certs/example-com/cert.pem' }] }), { status: 200 })
+		if (init?.method === 'DELETE') return new Response(JSON.stringify({ error: { code: 'CERT_DELETE_FILES_BACKUP_FAILED', message } }), { status: 409 })
+		return new Response(JSON.stringify({ ...certificateFixture, name: '不完整证书', mode: 'acme', status: 'failed' }), { status: 200 })
+	}))
+	renderWithClient(<Routes><Route path="/certificates/:id" element={<CertificateDetailPage />} /></Routes>, '/certificates/cert-1')
+	fireEvent.click(await screen.findByRole('button', { name: '删除失败记录' }))
+	const deleteFilesCheckbox = await screen.findByRole('checkbox', { name: '同时删除证书文件（先创建备份）' })
+	fireEvent.click(deleteFilesCheckbox)
+	fireEvent.change(screen.getByLabelText('输入证书名称 不完整证书 以确认'), { target: { value: '不完整证书' } })
+	fireEvent.change(screen.getByLabelText('管理员密码'), { target: { value: 'correct-password' } })
+	fireEvent.click(screen.getByRole('button', { name: '确认删除' }))
+	expect(await screen.findByText(message)).toBeInTheDocument()
+})
+
 test('私钥查看要求二次认证且响应只保存在组件内存', async () => {
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
     const url = String(input)

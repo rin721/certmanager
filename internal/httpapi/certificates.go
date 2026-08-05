@@ -15,8 +15,14 @@ import (
 
 const maxCertificateBody = 64 << 10
 
-var certificateFileNames = map[string]string{
-	"cert": "cert.pem", "chain": "chain.pem", "fullchain": "fullchain.pem", "private-key": "privkey.pem",
+var certificateFiles = []struct {
+	fileType string
+	filename string
+}{
+	{fileType: "cert", filename: "cert.pem"},
+	{fileType: "chain", filename: "chain.pem"},
+	{fileType: "fullchain", filename: "fullchain.pem"},
+	{fileType: "private-key", filename: "privkey.pem"},
 }
 
 type createCertificateRequest struct {
@@ -188,6 +194,10 @@ func (rt *Router) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "CERT_OPERATION_RUNNING", "该证书已有任务正在运行")
 		return
 	}
+	if errors.Is(err, certificate.ErrRevokeNotAllowed) {
+		writeError(w, http.StatusConflict, "CERT_REVOKE_NOT_ALLOWED", "当前记录没有可撤销的已签发公共证书")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "CERT_REVOKE_FAILED", "证书撤销失败，请查看任务日志")
 		return
@@ -223,6 +233,11 @@ func (rt *Router) deleteCertificate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "CERT_OPERATION_RUNNING", "该证书已有任务正在运行")
 		return
 	}
+	if errors.Is(err, certificate.ErrDeleteFilesBackup) {
+		rt.logger.WarnContext(r.Context(), "certificate file backup failed before delete", "certificate_id", value.ID, "error", err)
+		writeError(w, http.StatusConflict, "CERT_DELETE_FILES_BACKUP_FAILED", "证书文件备份失败，管理记录未删除")
+		return
+	}
 	if err != nil {
 		rt.internalError(w, r, "delete certificate", err)
 		return
@@ -253,8 +268,17 @@ func (rt *Router) listCertificateFiles(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items := make([]map[string]any, 0, len(certificateFileNames))
-	for fileType, filename := range certificateFileNames {
+	available, err := rt.certificates.AvailableFiles(r.Context(), value.ID)
+	if err != nil {
+		rt.internalError(w, r, "list certificate files", err)
+		return
+	}
+	items := make([]map[string]any, 0, len(available))
+	for _, definition := range certificateFiles {
+		fileType, filename := definition.fileType, definition.filename
+		if !available[filename] {
+			continue
+		}
 		items = append(items, map[string]any{
 			"type": fileType, "filename": filename, "private": fileType == "private-key",
 			"container_path": rt.certificates.ContainerPath(value, filename),
@@ -306,7 +330,15 @@ func (rt *Router) downloadCertificateArchive(w http.ResponseWriter, r *http.Requ
 		fileTypes = append(fileTypes, "private-key")
 	}
 	for _, fileType := range fileTypes {
-		filename := certificateFileNames[fileType]
+		filename, ok := certificateFileName(fileType)
+		if !ok {
+			resolveErr := errors.New("压缩包文件类型未注册")
+			if closeErr := archive.Close(); closeErr != nil {
+				resolveErr = errors.Join(resolveErr, fmt.Errorf("关闭证书压缩包: %w", closeErr))
+			}
+			rt.internalError(w, r, "resolve certificate archive file", resolveErr)
+			return
+		}
 		content, err := rt.certificates.ReadFile(r.Context(), value.ID, filename)
 		if err != nil {
 			_ = archive.Close()
@@ -384,7 +416,7 @@ func (rt *Router) auditPrivateKeyCopy(w http.ResponseWriter, r *http.Request) {
 
 func (rt *Router) serveCertificateFile(w http.ResponseWriter, r *http.Request, download bool) {
 	fileType := chi.URLParam(r, "type")
-	filename, ok := certificateFileNames[fileType]
+	filename, ok := certificateFileName(fileType)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "CERT_FILE_NOT_FOUND", "不支持的证书文件类型")
 		return
@@ -415,6 +447,15 @@ func (rt *Router) serveCertificateFile(w http.ResponseWriter, r *http.Request, d
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content)
+}
+
+func certificateFileName(fileType string) (string, bool) {
+	for _, definition := range certificateFiles {
+		if definition.fileType == fileType {
+			return definition.filename, true
+		}
+	}
+	return "", false
 }
 
 func (rt *Router) certificateByID(w http.ResponseWriter, r *http.Request) (certificate.Certificate, bool) {

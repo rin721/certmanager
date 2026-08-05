@@ -84,3 +84,51 @@ func TestPublisherRejectsSymlinkDuringBackup(t *testing.T) {
 		t.Fatal("备份阶段必须拒绝跟随符号链接")
 	}
 }
+
+func TestPublisherBackupTreatsMissingDirectoryAsNoFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	publisher := NewPublisher(root, filepath.Join(t.TempDir(), "backups"))
+	result, err := publisher.Backup("missing-certificate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DirectoryExisted || result.BackupCreated {
+		t.Fatalf("不存在的目录不应产生备份: %+v", result)
+	}
+	available, err := publisher.Available("missing-certificate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(available) != 0 {
+		t.Fatalf("不存在的目录不应返回文件: %+v", available)
+	}
+}
+
+func TestPublisherAvailableReturnsOnlyExistingSafeFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "certs")
+	target := filepath.Join(root, "partial-certificate")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "cert.pem"), []byte("cert"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	publisher := NewPublisher(root, filepath.Join(t.TempDir(), "backups"))
+	available, err := publisher.Available("partial-certificate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(available) != 1 || !available["cert.pem"] {
+		t.Fatalf("实际文件列表错误: %+v", available)
+	}
+	result, err := publisher.Backup("partial-certificate")
+	if err == nil {
+		t.Fatal("不完整目录必须拒绝备份")
+	}
+	if !result.DirectoryExisted || result.BackupCreated {
+		t.Fatalf("备份结果错误: %+v", result)
+	}
+}

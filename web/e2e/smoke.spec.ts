@@ -60,3 +60,47 @@ test('ACME 表单在提交前拒绝通配符冗余 SAN', async ({ page }) => {
 	await expect(page.getByText('SAN 域名 "www.example.com" 已被通配符 "*.example.com" 覆盖，请删除其中一个')).toBeVisible()
 	await expect(page.getByLabel('SAN 域名')).toBeVisible()
 })
+
+test('失败记录没有证书文件时可直接删除管理记录', async ({ page }) => {
+	const accessibilityErrors: string[] = []
+	let deletePayload: Record<string, unknown> | undefined
+	page.on('console', (message) => {
+		if (message.text().includes('aria-hidden')) accessibilityErrors.push(message.text())
+	})
+
+	await page.goto('/login')
+	await page.getByLabel('用户名').fill('admin')
+	await page.getByLabel('密码').fill('e2e-test-password')
+	await page.getByRole('button', { name: '登录' }).click()
+	await expect(page.getByText(/欢迎，admin/)).toBeVisible()
+
+	const failedCertificate = {
+		id: 'failed-e2e', name: 'E2E 失败记录', mode: 'acme', primary_domain: 'example.com', domains: ['example.com'],
+		key_type: 'ec-256', status: 'failed', output_directory: 'failed-e2e', issuer: '', serial_number: '',
+		fingerprint_sha256: '', auto_renew_enabled: true, renew_before_days: 30, create_renewed_marker: true,
+		created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:00Z', last_error: '签发失败',
+	}
+	await page.route('**/api/v1/certificates/failed-e2e', async (route) => {
+		if (route.request().method() === 'DELETE') {
+			deletePayload = route.request().postDataJSON() as Record<string, unknown>
+			await route.fulfill({ status: 204 })
+			return
+		}
+		await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(failedCertificate) })
+	})
+	await page.route('**/api/v1/certificates/failed-e2e/files', (route) => route.fulfill({
+		status: 200, contentType: 'application/json', body: JSON.stringify({ items: [] }),
+	}))
+
+	await page.goto('/certificates/failed-e2e')
+	await expect(page.getByRole('button', { name: '重试签发' })).toBeVisible()
+	await expect(page.getByRole('button', { name: '撤销' })).toHaveCount(0)
+	await page.getByRole('button', { name: '删除失败记录' }).click()
+	await expect(page.getByRole('checkbox', { name: '没有已发布的证书文件，只删除管理记录' })).toBeDisabled()
+	await page.getByLabel('输入证书名称 E2E 失败记录 以确认').fill('E2E 失败记录')
+	await page.getByLabel('管理员密码').fill('e2e-test-password')
+	await page.getByRole('button', { name: '确认删除' }).click()
+	await expect(page).toHaveURL(/\/certificates$/)
+	expect(deletePayload).toMatchObject({ confirm_name: 'E2E 失败记录', delete_files: false })
+	expect(accessibilityErrors).toEqual([])
+})

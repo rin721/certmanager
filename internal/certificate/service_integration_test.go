@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rin721/certmate/internal/audit"
 	"github.com/rin721/certmate/internal/certificate"
 	"github.com/rin721/certmate/internal/certificate/acmesh"
 	certfiles "github.com/rin721/certmate/internal/certificate/files"
@@ -46,8 +48,9 @@ func (b *blockingSelfSignedEngine) Renew(_ context.Context, request selfsigned.R
 }
 
 type fakeACMEEngine struct {
-	request    acmesh.IssueRequest
-	issueCalls int
+	request     acmesh.IssueRequest
+	issueCalls  int
+	revokeCalls int
 }
 
 func (f *fakeACMEEngine) Issue(_ context.Context, request acmesh.IssueRequest) (*acmesh.Result, error) {
@@ -66,8 +69,11 @@ func (f *fakeACMEEngine) Issue(_ context.Context, request acmesh.IssueRequest) (
 func (f *fakeACMEEngine) Renew(context.Context, acmesh.RenewRequest) (*acmesh.Result, error) {
 	return nil, nil
 }
-func (f *fakeACMEEngine) Revoke(context.Context, acmesh.RevokeRequest) error { return nil }
-func (f *fakeACMEEngine) Remove(context.Context, string) error               { return nil }
+func (f *fakeACMEEngine) Revoke(context.Context, acmesh.RevokeRequest) error {
+	f.revokeCalls++
+	return nil
+}
+func (f *fakeACMEEngine) Remove(context.Context, string) error { return nil }
 func (f *fakeACMEEngine) Info(context.Context, string) (*acmesh.CertificateInfo, error) {
 	return &acmesh.CertificateInfo{}, nil
 }
@@ -386,6 +392,175 @@ func TestManualIssueReusesExistingCertificateConfiguration(t *testing.T) {
 	}
 	if _, err := service.Issue(ctx, value.ID, "admin", "127.0.0.1"); err == nil {
 		t.Fatal("已撤销证书不应允许重新签发")
+	}
+}
+
+func TestDeleteFailedCertificateWithoutPublishedFiles(t *testing.T) {
+	for _, deleteFiles := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delete_files_%t", deleteFiles), func(t *testing.T) {
+			ctx := context.Background()
+			dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+			if err := os.Mkdir(certDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			store, err := sqlite.Open(ctx, dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if err := store.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			value := certificate.Certificate{
+				ID: "failed-certificate", Name: "失败记录", Mode: certificate.ModeACME,
+				PrimaryDomain: "example.com", Domains: []string{"example.com"}, KeyType: "ec-256",
+				Status: certificate.StatusFailed, OutputDirectory: "example-com", RenewBeforeDays: 30,
+			}
+			if err := store.CreateCertificate(ctx, &value); err != nil {
+				t.Fatal(err)
+			}
+			job := &jobs.Run{CertificateID: value.ID, JobType: "issue", Status: "failed"}
+			if err := store.CreateJob(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			service := certificate.NewService(store, nil, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), nil, nil)
+			if err := service.Delete(ctx, value.ID, deleteFiles, "admin", "127.0.0.1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Certificate(ctx, value.ID); !errors.Is(err, certificate.ErrNotFound) {
+				t.Fatalf("证书记录仍然存在: %v", err)
+			}
+			storedJobs, err := store.Jobs(ctx, jobs.Query{})
+			if err != nil || len(storedJobs) != 1 || storedJobs[0].CertificateID != "" {
+				t.Fatalf("任务历史未正确保留: jobs=%+v err=%v", storedJobs, err)
+			}
+			events, err := store.AuditEvents(ctx, audit.Query{EventType: "certificate.delete"})
+			if err != nil || len(events) != 1 || events[0].CertificateID != "" {
+				t.Fatalf("删除审计未正确保留: events=%+v err=%v", events, err)
+			}
+			if events[0].Detail["certificate_id"] != value.ID || events[0].Detail["certificate_status"] != string(certificate.StatusFailed) {
+				t.Fatalf("删除审计详情错误: %+v", events[0].Detail)
+			}
+		})
+	}
+}
+
+func TestDeletePublishedCertificateBacksUpFiles(t *testing.T) {
+	ctx := context.Background()
+	dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(certDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	service := certificate.NewService(store, fakeSelfSignedEngine{}, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), nil, nil)
+	value, err := service.CreateSelfSigned(ctx, certificate.CreateSelfSignedRequest{
+		Name: "待删除证书", PrimaryDomain: "example.com", KeyType: "ec-256", ValidDays: 90,
+		OutputDirectory: "example-com", RenewBeforeDays: 30,
+	}, "admin", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete(ctx, value.ID, true, "admin", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(certDir, value.OutputDirectory)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("证书目录未删除: %v", err)
+	}
+	backups, err := os.ReadDir(filepath.Join(dataDir, "backups"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("删除备份错误: backups=%v err=%v", backups, err)
+	}
+}
+
+func TestDeleteCertificateKeepsRecordWhenBackupFails(t *testing.T) {
+	ctx := context.Background()
+	dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+	if err := os.MkdirAll(filepath.Join(certDir, "partial-certificate"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(certDir, "partial-certificate", "cert.pem"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	value := certificate.Certificate{
+		ID: "partial", Name: "不完整证书", Mode: certificate.ModeACME, PrimaryDomain: "example.com",
+		Domains: []string{"example.com"}, KeyType: "ec-256", Status: certificate.StatusFailed,
+		OutputDirectory: "partial-certificate", RenewBeforeDays: 30,
+	}
+	if err := store.CreateCertificate(ctx, &value); err != nil {
+		t.Fatal(err)
+	}
+	service := certificate.NewService(store, nil, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), nil, nil)
+	if err := service.Delete(ctx, value.ID, true, "admin", "127.0.0.1"); !errors.Is(err, certificate.ErrDeleteFilesBackup) {
+		t.Fatalf("应返回备份错误: %v", err)
+	}
+	if _, err := store.Certificate(ctx, value.ID); err != nil {
+		t.Fatalf("备份失败时管理记录必须保留: %v", err)
+	}
+	events, err := store.AuditEvents(ctx, audit.Query{CertificateID: value.ID, EventType: "certificate.delete"})
+	if err != nil || len(events) != 1 || events[0].Result != "failed" {
+		t.Fatalf("失败审计错误: events=%+v err=%v", events, err)
+	}
+}
+
+func TestRevokeRejectsCertificateWithoutRevocableMaterial(t *testing.T) {
+	ctx := context.Background()
+	dataDir, certDir := filepath.Join(t.TempDir(), "data"), filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(certDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine := &fakeACMEEngine{}
+	service := certificate.NewService(store, nil, certfiles.NewPublisher(certDir, filepath.Join(dataDir, "backups")), engine, nil)
+	for _, status := range []certificate.Status{certificate.StatusPending, certificate.StatusFailed, certificate.StatusExpired, certificate.StatusRevoked, certificate.StatusDisabled} {
+		value := certificate.Certificate{
+			ID: "revoke-" + string(status), Name: "不可撤销", Mode: certificate.ModeACME,
+			PrimaryDomain: "example.com", Domains: []string{"example.com"}, KeyType: "ec-256",
+			Status: status, OutputDirectory: "cert-" + string(status), RenewBeforeDays: 30,
+		}
+		if err := store.CreateCertificate(ctx, &value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Revoke(ctx, value.ID, "admin", "127.0.0.1"); !errors.Is(err, certificate.ErrRevokeNotAllowed) {
+			t.Fatalf("status=%s err=%v", status, err)
+		}
+	}
+	if engine.revokeCalls != 0 {
+		t.Fatalf("不允许撤销时调用了 ACME: %d", engine.revokeCalls)
+	}
+	runs, err := store.Jobs(ctx, jobs.Query{JobType: "revoke"})
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("不允许撤销时创建了任务: runs=%+v err=%v", runs, err)
+	}
+	for _, status := range []certificate.Status{certificate.StatusPending, certificate.StatusFailed} {
+		if _, err := service.Renew(ctx, "revoke-"+string(status), false, "admin", "127.0.0.1"); err == nil {
+			t.Fatalf("status=%s 不应允许续签", status)
+		}
+	}
+	runs, err = store.Jobs(ctx, jobs.Query{JobType: "renew"})
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("pending/failed 续签不应创建任务: runs=%+v err=%v", runs, err)
 	}
 }
 

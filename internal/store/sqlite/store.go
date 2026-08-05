@@ -331,17 +331,50 @@ func (s *Store) UpdateCertificateSettings(ctx context.Context, id, name string, 
 	return nil
 }
 
-func (s *Store) DeleteCertificate(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM certificates WHERE id = ?`, id)
+func (s *Store) DeleteCertificateWithAudit(ctx context.Context, id string, event *audit.Event) error {
+	if event.ID == "" {
+		event.ID = newID()
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = s.now().UTC()
+	}
+	detail, err := json.Marshal(event.Detail)
 	if err != nil {
-		return fmt.Errorf("删除证书记录: %w", err)
+		return fmt.Errorf("编码删除审计详情: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开始删除证书事务: %w", err)
+	}
+	rollback := func(operationErr error) error {
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return errors.Join(operationErr, fmt.Errorf("回滚删除证书事务: %w", rollbackErr))
+		}
+		return operationErr
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_events (
+			id, certificate_id, event_type, actor, client_ip, result, detail_json, created_at
+		) VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)`,
+		event.ID, event.CertificateID, event.EventType, event.Actor, event.ClientIP,
+		event.Result, string(detail), event.CreatedAt.UTC().Format(timestampLayout),
+	); err != nil {
+		return rollback(fmt.Errorf("创建删除审计记录: %w", err))
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM certificates WHERE id = ?`, id)
+	if err != nil {
+		return rollback(fmt.Errorf("删除证书记录: %w", err))
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return rollback(fmt.Errorf("读取删除证书结果: %w", err))
 	}
 	if count == 0 {
-		return certificate.ErrNotFound
+		return rollback(certificate.ErrNotFound)
+	}
+	if err := tx.Commit(); err != nil {
+		return rollback(fmt.Errorf("提交删除证书事务: %w", err))
 	}
 	return nil
 }
