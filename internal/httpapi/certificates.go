@@ -13,7 +13,10 @@ import (
 	"github.com/rin721/certmate/internal/certificate"
 )
 
-const maxCertificateBody = 64 << 10
+const (
+	maxCertificateBody                   = 64 << 10
+	certificateDNSZoneUnavailableErrCode = "CERT_DNS_ZONE_UNAVAILABLE"
+)
 
 var certificateFiles = []struct {
 	fileType string
@@ -62,6 +65,15 @@ func writeRedundantDomainError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+func writeDNSZoneUnavailableError(w http.ResponseWriter, err error) bool {
+	var zoneError *certificate.DNSZoneUnavailableError
+	if !errors.As(err, &zoneError) {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, certificateDNSZoneUnavailableErrCode, zoneError.Error())
+	return true
+}
+
 func (rt *Router) listCertificates(w http.ResponseWriter, r *http.Request) {
 	values, err := rt.certificates.List(r.Context())
 	if err != nil {
@@ -104,6 +116,9 @@ func (rt *Router) createCertificate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		rt.logger.WarnContext(r.Context(), "certificate creation failed", "error", err)
 		if writeRedundantDomainError(w, err) {
+			return
+		}
+		if writeDNSZoneUnavailableError(w, err) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "CERT_ISSUE_FAILED", "证书创建失败，请检查配置和任务日志")
@@ -156,6 +171,9 @@ func (rt *Router) issueCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if writeRedundantDomainError(w, err) {
+			return
+		}
+		if writeDNSZoneUnavailableError(w, err) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "CERT_ISSUE_FAILED", "证书重新签发失败，请查看任务日志")
@@ -257,6 +275,9 @@ func (rt *Router) runCertificateRenewal(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err != nil {
+		if writeDNSZoneUnavailableError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "CERT_RENEW_FAILED", "证书续签失败，请查看任务日志")
 		return
 	}

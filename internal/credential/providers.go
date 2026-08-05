@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// ACMEDNSCloudflare 是 acme.sh Cloudflare DNS Provider 的稳定标识。
+const ACMEDNSCloudflare = "dns_cf"
+
 type Field struct {
 	Name        string `json:"name"`
 	Label       string `json:"label"`
@@ -31,7 +34,7 @@ type Registry struct {
 
 func NewRegistry() *Registry {
 	values := []Provider{
-		{Code: "cloudflare", DisplayName: "Cloudflare", ACMEDNSCode: "dns_cf", DocumentationHint: "推荐使用仅具 DNS 编辑权限的 API Token。", Fields: []Field{
+		{Code: "cloudflare", DisplayName: "Cloudflare", ACMEDNSCode: ACMEDNSCloudflare, DocumentationHint: "API Token 必须具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限，并将资源范围限定到目标 Zone。", Fields: []Field{
 			{Name: "CF_Token", Label: "API Token", Required: true, Secret: true},
 			{Name: "CF_Zone_ID", Label: "Zone ID", Secret: true, Description: "可选；限制到单个 Zone。"},
 			{Name: "CF_Account_ID", Label: "Account ID", Secret: true, Description: "多账户场景可选。"},

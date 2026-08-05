@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/rin721/certmate/internal/certificate/acmesh"
 	certfiles "github.com/rin721/certmate/internal/certificate/files"
 	"github.com/rin721/certmate/internal/config"
+	"github.com/rin721/certmate/internal/credential"
 	"github.com/rin721/certmate/internal/jobs"
 	"github.com/rin721/certmate/internal/store/sqlite"
 	"golang.org/x/crypto/bcrypt"
@@ -38,6 +41,95 @@ func (unusedACMEEngine) Revoke(context.Context, acmesh.RevokeRequest) error { re
 func (unusedACMEEngine) Remove(context.Context, string) error               { return nil }
 func (unusedACMEEngine) Info(context.Context, string) (*acmesh.CertificateInfo, error) {
 	return &acmesh.CertificateInfo{}, nil
+}
+
+type cloudflareZoneFailureEngine struct{}
+
+func (cloudflareZoneFailureEngine) Issue(context.Context, acmesh.IssueRequest) (*acmesh.Result, error) {
+	return nil, cloudflareZoneCommandError("issue")
+}
+
+func (cloudflareZoneFailureEngine) Renew(context.Context, acmesh.RenewRequest) (*acmesh.Result, error) {
+	return nil, cloudflareZoneCommandError("renew")
+}
+
+func (cloudflareZoneFailureEngine) Revoke(context.Context, acmesh.RevokeRequest) error { return nil }
+func (cloudflareZoneFailureEngine) Remove(context.Context, string) error               { return nil }
+func (cloudflareZoneFailureEngine) Info(context.Context, string) (*acmesh.CertificateInfo, error) {
+	return &acmesh.CertificateInfo{}, nil
+}
+
+func cloudflareZoneCommandError(operation string) error {
+	return &acmesh.CommandError{
+		Operation: operation, ExitCode: 1, Retryable: true, Kind: acmesh.FailureDNSZoneUnavailable,
+		Summary: "Adding TXT value: [REDACTED] for domain: _acme-challenge.example.com\ninvalid domain\nError adding TXT record to domain: _acme-challenge.example.com",
+		Cause:   errors.New("exit status 1"),
+	}
+}
+
+func TestCertificateAPIReturnsCloudflareZoneErrorForCreateIssueAndRenew(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := credential.NewCipher([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialService := credential.NewService(store, credential.NewRegistry(), cipher)
+	credentialValue := strings.Repeat("x", 32)
+	cloudflareCredential, err := credentialService.Create(ctx, credential.CreateRequest{
+		Name: "Cloudflare", Provider: "cloudflare", SourceMode: "encrypted",
+		Values: map[string]string{"CF_Token": credentialValue},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := certificate.NewService(store, nil, nil, cloudflareZoneFailureEngine{}, credentialService)
+	server, client, csrfToken := newAuthenticatedCertificateServer(t, store, service)
+	expectedMessage := "Cloudflare 无法访问域名 \"example.com\" 的 Zone；请确认 Token 有效，具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限，资源范围包含该 Zone，且 Token IP 限制允许当前服务器"
+
+	response := postJSON(t, client, server.URL+"/api/v1/certificates", csrfToken, map[string]any{
+		"mode": "acme", "name": "Cloudflare 失败证书", "primary_domain": "example.com",
+		"sans": []string{"*.example.com"}, "key_type": "ec-256", "output_directory": "example-com",
+		"auto_renew_enabled": true, "renew_before_days": 30, "challenge_type": "dns-01",
+		"dns_credential_id": cloudflareCredential.ID, "ca_directory_url": "letsencrypt", "acme_email": "admin@example.com",
+	})
+	assertCertificateErrorMessage(t, response, http.StatusBadRequest, "CERT_DNS_ZONE_UNAVAILABLE", expectedMessage)
+
+	values, err := store.Certificates(ctx)
+	if err != nil || len(values) != 1 {
+		t.Fatalf("创建失败记录异常: values=%+v err=%v", values, err)
+	}
+	failed := values[0]
+	if failed.Status != certificate.StatusFailed || failed.LastError != expectedMessage {
+		t.Fatalf("失败记录未保存安全诊断: status=%s last_error=%q", failed.Status, failed.LastError)
+	}
+	runs, err := store.Jobs(ctx, jobs.Query{CertificateID: failed.ID})
+	if err != nil || len(runs) != 1 || runs[0].ErrorMessage != expectedMessage || strings.Contains(runs[0].ErrorMessage, credentialValue) {
+		t.Fatalf("任务诊断未正确脱敏: runs=%+v err=%v", runs, err)
+	}
+
+	response = postJSON(t, client, server.URL+"/api/v1/certificates/"+failed.ID+"/issue", csrfToken, nil)
+	assertCertificateErrorMessage(t, response, http.StatusBadRequest, "CERT_DNS_ZONE_UNAVAILABLE", expectedMessage)
+
+	active := certificate.Certificate{
+		ID: "cloudflare-active", Name: "Cloudflare 续签证书", Mode: certificate.ModeACME,
+		PrimaryDomain: "example.com", Domains: []string{"example.com", "*.example.com"}, KeyType: "ec-256",
+		Status: certificate.StatusActive, OutputDirectory: "cloudflare-active", AutoRenewEnabled: true,
+		RenewBeforeDays: 30, ChallengeType: "dns-01", DNSProvider: "dns_cf",
+		DNSCredentialID: cloudflareCredential.ID, CADirectoryURL: "letsencrypt", ACMEEmail: "admin@example.com",
+	}
+	if err := store.CreateCertificate(ctx, &active); err != nil {
+		t.Fatal(err)
+	}
+	response = postJSON(t, client, server.URL+"/api/v1/certificates/"+active.ID+"/renew", csrfToken, nil)
+	assertCertificateErrorMessage(t, response, http.StatusBadRequest, "CERT_DNS_ZONE_UNAVAILABLE", expectedMessage)
 }
 
 func TestCertificateAPIReturnsRedundantDomainErrorForCreateAndIssue(t *testing.T) {
@@ -219,6 +311,22 @@ func assertRedundantDomainResponse(t *testing.T, response *http.Response, expect
 		t.Fatal(err)
 	}
 	if body.Error.Code != "CERT_DOMAIN_REDUNDANT" || body.Error.Message != expectedMessage {
+		t.Fatalf("error=%+v", body.Error)
+	}
+}
+
+func assertCertificateErrorMessage(t *testing.T, response *http.Response, status int, code, message string) {
+	t.Helper()
+	defer response.Body.Close()
+	if response.StatusCode != status {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var body errorBody
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != code || body.Error.Message != message {
 		t.Fatalf("error=%+v", body.Error)
 	}
 }

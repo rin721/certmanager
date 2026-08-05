@@ -6,6 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, test, vi } from 'vitest'
 import { CertificateDetailPage, CertificateListPage, CreateCertificatePage } from './CertificatePages'
+import { DNSCredentialsPage } from './DNSCredentialsPage'
 import { LoginPage } from './LoginPage'
 import { RenewalSettingsPage } from './RenewalSettingsPage'
 import { findRedundantACMEDomain, isSafeCADirectoryURL } from './validation'
@@ -107,6 +108,45 @@ test('ACME 通配符覆盖规则只匹配一级子域名', () => {
 	expect(findRedundantACMEDomain('www.example.com', ['*.example.com'])).toEqual({
 	domain: 'www.example.com', wildcard: '*.example.com', primary: true,
 	})
+})
+
+test('Cloudflare 凭据明确本地校验边界和必要权限', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/api/v1/dns-providers')) return new Response(JSON.stringify({ items: [cloudflareProviderFixture] }), { status: 200 })
+    return new Response(JSON.stringify({ items: [cloudflareCredentialFixture] }), { status: 200 })
+  }))
+  renderWithClient(<DNSCredentialsPage />)
+  expect(await screen.findByRole('button', { name: '本地校验' })).toBeInTheDocument()
+  expect(screen.getByText(/不能验证 Token 权限或 Zone 资源范围/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '新建凭据' }))
+  expect(await screen.findByText('API Token 必须具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限，并将资源范围限定到目标 Zone。')).toBeInTheDocument()
+})
+
+test('Cloudflare 创建证书显示权限要求和精准签发错误', async () => {
+  const message = 'Cloudflare 无法访问域名 "example.com" 的 Zone；请确认 Token 有效，具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限，资源范围包含该 Zone，且 Token IP 限制允许当前服务器'
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/api/v1/auth/csrf')) return new Response(JSON.stringify({ csrf_token: 'test-token' }), { status: 200 })
+    if (init?.method === 'POST' && url.endsWith('/api/v1/certificates')) return new Response(JSON.stringify({ error: { code: 'CERT_DNS_ZONE_UNAVAILABLE', message } }), { status: 400 })
+    return new Response(JSON.stringify({ items: [cloudflareCredentialFixture] }), { status: 200 })
+  }))
+  renderWithClient(<CreateCertificatePage />)
+  fireEvent.click(screen.getByRole('button', { name: '公共 CA 证书' }))
+  fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+  fireEvent.change(await screen.findByLabelText('证书名称'), { target: { value: 'Cloudflare 公共证书' } })
+  fireEvent.change(screen.getByLabelText('主域名'), { target: { value: 'example.com' } })
+  fireEvent.change(screen.getByLabelText('SAN 域名'), { target: { value: '*.example.com' } })
+  fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+  fireEvent.change(await screen.findByLabelText('ACME 邮箱'), { target: { value: 'admin@example.com' } })
+  fireEvent.mouseDown(screen.getByLabelText('DNS 凭据'))
+  fireEvent.click(await screen.findByRole('option', { name: 'cf-dns' }))
+  expect(await screen.findByText(/Cloudflare Token 必须具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+  expect(await screen.findByLabelText('安全输出目录名')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+  fireEvent.click(await screen.findByRole('button', { name: '确认并创建' }))
+  expect(await screen.findByText(message)).toBeInTheDocument()
 })
 
 test('证书详情页提供兼容的重新签发操作', async () => {
@@ -217,4 +257,15 @@ const certificateFixture = {
   not_before: '2026-08-05T00:00:00Z', not_after: '2027-08-05T00:00:00Z', fingerprint_sha256: 'AA',
   auto_renew_enabled: true, renew_before_days: 30, self_signed_valid_days: 365, create_renewed_marker: true,
   created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:00Z',
+}
+
+const cloudflareCredentialFixture = {
+  id: 'cf-credential', name: 'cf-dns', provider: 'cloudflare', acme_dns_code: 'dns_cf', source_mode: 'encrypted',
+  masked_fields: ['CF_Token'], created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:00Z',
+}
+
+const cloudflareProviderFixture = {
+  provider_code: 'cloudflare', display_name: 'Cloudflare', acme_dns_code: 'dns_cf', custom: false,
+  documentation_hint: 'API Token 必须具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限，并将资源范围限定到目标 Zone。',
+  fields: [{ name: 'CF_Token', label: 'API Token', required: true, secret: true }],
 }

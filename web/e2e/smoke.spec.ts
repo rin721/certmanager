@@ -80,6 +80,11 @@ test('失败记录没有证书文件时可直接删除管理记录', async ({ pa
 		fingerprint_sha256: '', auto_renew_enabled: true, renew_before_days: 30, create_renewed_marker: true,
 		created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:00Z', last_error: '签发失败',
 	}
+	const zoneError = 'Cloudflare 无法访问域名 "example.com" 的 Zone；请确认 Token 有效，具备 Zone:Zone:Read 和 Zone:DNS:Edit 权限，资源范围包含该 Zone，且 Token IP 限制允许当前服务器'
+	await page.route('**/api/v1/certificates/failed-e2e/issue', (route) => route.fulfill({
+		status: 400, contentType: 'application/json',
+		body: JSON.stringify({ error: { code: 'CERT_DNS_ZONE_UNAVAILABLE', message: zoneError } }),
+	}))
 	await page.route('**/api/v1/certificates/failed-e2e', async (route) => {
 		if (route.request().method() === 'DELETE') {
 			deletePayload = route.request().postDataJSON() as Record<string, unknown>
@@ -95,6 +100,8 @@ test('失败记录没有证书文件时可直接删除管理记录', async ({ pa
 	await page.goto('/certificates/failed-e2e')
 	await expect(page.getByRole('button', { name: '重试签发' })).toBeVisible()
 	await expect(page.getByRole('button', { name: '撤销' })).toHaveCount(0)
+	await page.getByRole('button', { name: '重试签发' }).click()
+	await expect(page.getByText(zoneError)).toBeVisible()
 	await page.getByRole('button', { name: '删除失败记录' }).click()
 	await expect(page.getByRole('checkbox', { name: '没有已发布的证书文件，只删除管理记录' })).toBeDisabled()
 	await page.getByLabel('输入证书名称 E2E 失败记录 以确认').fill('E2E 失败记录')

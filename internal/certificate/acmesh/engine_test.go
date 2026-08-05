@@ -70,6 +70,31 @@ func TestRedactOutputRemovesCredentialValues(t *testing.T) {
 	}
 }
 
+func TestRedactOutputRemovesDNSChallengeValue(t *testing.T) {
+	result := redactOutput("Adding TXT value: challenge-value for domain: _acme-challenge.example.com", nil)
+	if strings.Contains(result, "challenge-value") {
+		t.Fatalf("DNS 挑战值未脱敏: %s", result)
+	}
+	if !strings.Contains(result, "Adding TXT value: [REDACTED] for domain: _acme-challenge.example.com") {
+		t.Fatalf("脱敏后应保留安全诊断上下文: %s", result)
+	}
+}
+
+func TestClassifyCloudflareZoneFailure(t *testing.T) {
+	output := "invalid domain\nError adding TXT record to domain: _acme-challenge.example.com"
+	if kind := classifyDNSFailure("dns_cf", output); kind != FailureDNSZoneUnavailable {
+		t.Fatalf("Cloudflare Zone 查询失败分类错误: %q", kind)
+	}
+	for _, provider := range []string{"dns_ali", "dns_dp", ""} {
+		if kind := classifyDNSFailure(provider, output); kind != "" {
+			t.Fatalf("Provider %q 不应被误判: %q", provider, kind)
+		}
+	}
+	if kind := classifyDNSFailure("dns_cf", "invalid domain"); kind != "" {
+		t.Fatalf("缺少 TXT 写入上下文时不应误判: %q", kind)
+	}
+}
+
 func TestRejectsDomainAndCAInjection(t *testing.T) {
 	for _, domain := range []string{"example.com\n--force", "../example.com", "foo.-bad.com"} {
 		if err := validateDomain(domain); err == nil {

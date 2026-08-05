@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,14 @@ import (
 )
 
 const maxOutput = 512 << 10
+
+// FailureKind 表示 acme.sh 输出中可安全转换为业务提示的失败类别。
+type FailureKind string
+
+const (
+	// FailureDNSZoneUnavailable 表示 DNS Provider 无法定位或访问目标 Zone。
+	FailureDNSZoneUnavailable FailureKind = "dns_zone_unavailable"
+)
 
 type IssueRequest struct {
 	CertificateID string
@@ -39,6 +48,7 @@ type RenewRequest struct {
 	PrimaryDomain string
 	KeyType       string
 	Force         bool
+	DNSProvider   string
 	DNSVariables  map[string]string
 	CADirectory   string
 }
@@ -95,7 +105,7 @@ func (c *CLI) Issue(ctx context.Context, request IssueRequest) (*Result, error) 
 	}
 	exitCode, output, err := c.run(ctx, arguments, request.DNSVariables)
 	if err != nil {
-		return nil, &CommandError{Operation: "issue", ExitCode: exitCode, Summary: output, Retryable: true, Cause: err}
+		return nil, newCommandError("issue", request.DNSProvider, exitCode, output, true, err)
 	}
 	return c.install(ctx, request.PrimaryDomain, request.KeyType, request.DNSVariables, output)
 }
@@ -107,7 +117,7 @@ func (c *CLI) Renew(ctx context.Context, request RenewRequest) (*Result, error) 
 	}
 	exitCode, output, err := c.run(ctx, arguments, request.DNSVariables)
 	if err != nil {
-		return nil, &CommandError{Operation: "renew", ExitCode: exitCode, Summary: output, Retryable: true, Cause: err}
+		return nil, newCommandError("renew", request.DNSProvider, exitCode, output, true, err)
 	}
 	return c.install(ctx, request.PrimaryDomain, request.KeyType, request.DNSVariables, output)
 }
@@ -324,6 +334,7 @@ type CommandError struct {
 	ExitCode  int
 	Summary   string
 	Retryable bool
+	Kind      FailureKind
 	Cause     error
 }
 
@@ -331,6 +342,20 @@ func (e *CommandError) Error() string {
 	return fmt.Sprintf("acme.sh %s 失败(exit=%d): %s", e.Operation, e.ExitCode, e.Summary)
 }
 func (e *CommandError) Unwrap() error { return e.Cause }
+
+func newCommandError(operation, dnsProvider string, exitCode int, output string, retryable bool, cause error) *CommandError {
+	return &CommandError{
+		Operation: operation, ExitCode: exitCode, Summary: output, Retryable: retryable,
+		Kind: classifyDNSFailure(dnsProvider, output), Cause: cause,
+	}
+}
+
+func classifyDNSFailure(dnsProvider, output string) FailureKind {
+	if dnsProvider == credential.ACMEDNSCloudflare && strings.Contains(output, "invalid domain") && strings.Contains(output, "Error adding TXT record to domain:") {
+		return FailureDNSZoneUnavailable
+	}
+	return ""
+}
 
 func validateDomain(value string) error {
 	if value == "" || len(value) > 253 || strings.ContainsAny(value, "\r\n") || value != strings.ToLower(value) {
@@ -403,6 +428,8 @@ func (b *boundedBuffer) Write(value []byte) (int, error) {
 }
 func (b *boundedBuffer) String() string { return b.buffer.String() }
 
+var txtChallengeValuePattern = regexp.MustCompile(`(?m)(Adding TXT value:\s*)\S+`)
+
 func redactOutput(value string, variables map[string]string) string {
 	secrets := make([]string, 0, len(variables))
 	for _, secret := range variables {
@@ -414,6 +441,7 @@ func redactOutput(value string, variables map[string]string) string {
 	for _, secret := range secrets {
 		value = strings.ReplaceAll(value, secret, "[REDACTED]")
 	}
+	value = txtChallengeValuePattern.ReplaceAllString(value, "${1}[REDACTED]")
 	return value
 }
 

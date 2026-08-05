@@ -128,7 +128,16 @@ ACME 到期判断与协议由 acme.sh 负责；CertMate 按证书策略启动普
 
 ## 12. Cloudflare DNS-01 示例
 
-在 Cloudflare 创建仅能编辑目标 Zone DNS 的 API Token。进入“DNS 凭据”，选择 Cloudflare，推荐填写 `CF_Token`；不要使用全局 API Key。凭据可加密保存到 SQLite，或只保存环境变量名引用。页面中的“测试”只做本地解密/环境变量解析，不会调用第三方 DNS API 或修改记录。随后创建公共证书，选择 DNS-01 与该凭据。
+在 Cloudflare 创建 API Token 时使用最小权限，并同时配置：
+
+- `Zone → Zone → Read`：acme.sh 需要查询域名所属 Zone；
+- `Zone → DNS → Edit`：创建、查询和删除 `_acme-challenge` TXT 记录；
+- Zone 资源范围包含待签发域名所属的 Zone，例如 `iqwq.com`；
+- 如启用 Client IP Address Filtering，必须允许 CertMate 服务器的公网出口地址。
+
+进入“DNS 凭据”，选择 Cloudflare，推荐填写 `CF_Token`，不要使用全局 API Key。凭据可加密保存到 SQLite，或只保存环境变量名引用。页面中的“本地校验”只验证解密或环境变量解析，不会调用 Cloudflare，也不能证明 Token 权限和 Zone 范围正确。随后创建公共证书，选择 DNS-01 与该凭据。
+
+如果任务显示 `invalid domain` 且紧接着出现 `Error adding TXT record`，通常表示 Cloudflare Token 无法查询目标 Zone，而不是证书域名格式错误。请检查上述两项权限、Zone 资源范围、Token 有效期和 IP 限制；修正后在“DNS 凭据”中点击“替换密钥”，再到 failed 证书详情点击“重试签发”，无需删除并重新创建记录。
 
 加密模式依赖 `APP_ENCRYPTION_KEY` 的 AES-GCM 保护；环境引用模式不会把值写入数据库。页面与 API 永远只返回字段名/掩码，不返回凭据值。
 

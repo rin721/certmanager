@@ -1,6 +1,9 @@
 package credential
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRegistryContainsOfficialACMEShFields(t *testing.T) {
 	registry := NewRegistry()
@@ -25,6 +28,10 @@ func TestRegistryContainsOfficialACMEShFields(t *testing.T) {
 				t.Errorf("Provider %s 缺少 %s", code, name)
 			}
 		}
+	}
+	cloudflare, ok := registry.Get("cloudflare")
+	if !ok || !strings.Contains(cloudflare.DocumentationHint, "Zone:Zone:Read") || !strings.Contains(cloudflare.DocumentationHint, "Zone:DNS:Edit") {
+		t.Fatalf("Cloudflare 权限提示不完整: %+v", cloudflare)
 	}
 }
 

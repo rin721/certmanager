@@ -283,9 +283,11 @@ func (s *Service) issueExisting(ctx context.Context, id string, force bool, jobT
 		}
 		result, renewErr := s.acme.Renew(ctx, acmesh.RenewRequest{
 			CertificateID: id, PrimaryDomain: value.PrimaryDomain, KeyType: value.KeyType,
-			Force: force, DNSVariables: processValues.Environment, CADirectory: value.CADirectoryURL,
+			Force: force, DNSProvider: processValues.ACMEDNSCode,
+			DNSVariables: processValues.Environment, CADirectory: value.CADirectoryURL,
 		})
 		if renewErr != nil {
+			renewErr = normalizeACMEError(renewErr, value.PrimaryDomain)
 			return Certificate{}, s.failRenewal(ctx, value, job, acmeExitCode(renewErr), "", renewErr, eventType, actor, clientIP)
 		}
 		if result == nil {
@@ -377,6 +379,7 @@ func (s *Service) issueExistingCertificate(ctx context.Context, value Certificat
 			CADirectory: value.CADirectoryURL, Email: value.ACMEEmail,
 		})
 		if issueErr != nil {
+			issueErr = normalizeACMEError(issueErr, value.PrimaryDomain)
 			return Certificate{}, s.failRenewal(ctx, value, job, acmeExitCode(issueErr), "", issueErr, "certificate.issue", actor, clientIP)
 		}
 		if result == nil {
@@ -544,6 +547,7 @@ func (s *Service) CreateACME(ctx context.Context, request CreateACMERequest, act
 		DNSVariables: processValues.Environment, CADirectory: request.CADirectoryURL, Email: request.ACMEEmail,
 	})
 	if issueErr != nil {
+		issueErr = normalizeACMEError(issueErr, primary)
 		message := safeError(issueErr)
 		_ = s.store.FinishJob(ctx, job.ID, "failed", acmeExitCode(issueErr), "", message)
 		_ = s.store.MarkCertificateFailed(ctx, value.ID, message)
