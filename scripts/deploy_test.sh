@@ -63,6 +63,11 @@ if [[ "${1:-}" == "inspect" ]]; then
     printf 'healthy\n'
 elif [[ "${1:-}" == "compose" && " $* " == *" ps -q certmate "* ]]; then
     printf 'mock-container-id\n'
+elif [[ "${1:-}" == "compose" && " $* " == *" up -d --force-recreate "* && "${MOCK_DOCKER_UP_FAILURE:-}" == "1" ]]; then
+    printf 'Bind for 0.0.0.0:8080 failed: port is already allocated\n' >&2
+    exit 1
+elif [[ "${1:-}" == "ps" && "${MOCK_DOCKER_PORT_CONFLICT:-}" == "1" ]]; then
+    printf 'existing-service: 0.0.0.0:8080->80/tcp\n'
 elif [[ " ${*} " == *" hash-password "* ]]; then
     printf '%s\n' '$2y$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 elif [[ " ${*} " == *" random-secret "* ]]; then
@@ -114,6 +119,8 @@ run_deploy() {
         MOCK_PROJECT_ROOT="${workspace}" \
         MOCK_GIT_DIFF_FAILURE="${MOCK_GIT_DIFF_FAILURE:-}" \
         MOCK_GIT_PULL_FAILURE="${MOCK_GIT_PULL_FAILURE:-}" \
+        MOCK_DOCKER_UP_FAILURE="${MOCK_DOCKER_UP_FAILURE:-}" \
+        MOCK_DOCKER_PORT_CONFLICT="${MOCK_DOCKER_PORT_CONFLICT:-}" \
         bash "${workspace}/scripts/deploy.sh" "${arguments[@]}" > "${output_file}" 2>&1
 }
 
@@ -308,6 +315,25 @@ test_update_failure_stops_before_docker() {
     pass "Git 更新失败时不启动 Docker"
 }
 
+test_port_conflict_reports_correct_configuration() {
+    local workspace output_file
+    workspace="$(new_workspace port-conflict)"
+    output_file="${workspace}/output.log"
+    run_deploy "${workspace}" "${output_file}" init
+    configure_common_values "${workspace}"
+    set_env_value "${workspace}/.env" SESSION_SECRET aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    set_env_value "${workspace}/.env" APP_ENCRYPTION_KEY bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+    if MOCK_DOCKER_UP_FAILURE=1 MOCK_DOCKER_PORT_CONFLICT=1 run_deploy "${workspace}" "${output_file}" init; then
+        fail "宿主机端口冲突时部署应失败"
+    fi
+    assert_contains "${output_file}" "宿主机端口 8080 已被占用"
+    assert_contains "${output_file}" "APP_PORT=8081"
+    assert_contains "${output_file}" "LISTEN_ADDR=:8080"
+    assert_contains "${output_file}" "existing-service: 0.0.0.0:8080->80/tcp"
+    pass "端口冲突会说明宿主机与容器端口的配置边界"
+}
+
 test_first_run_stops_after_copy
 test_second_run_generates_once_and_deploys
 test_secret_file_references_skip_generation
@@ -315,5 +341,6 @@ test_configure_admin_writes_bcrypt_only
 test_invalid_configuration_stops_before_docker
 test_update_pulls_then_deploys
 test_update_failure_stops_before_docker
+test_port_conflict_reports_correct_configuration
 
 printf '\n全部 %s 组部署脚本测试通过。\n' "${TEST_COUNT}"

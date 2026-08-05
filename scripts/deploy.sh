@@ -433,6 +433,30 @@ show_service_logs() {
     docker compose --env-file "${ENV_FILE}" logs --tail=100 "${SERVICE_NAME}" >&2 || true
 }
 
+show_compose_start_help() {
+    local app_port published_containers
+    app_port="$(env_value APP_PORT 8080)"
+
+    cat >&2 <<EOF
+
+启动排查：如果上方错误包含 "port is already allocated"，说明宿主机端口 ${app_port} 已被占用。
+可先查看占用该端口的 Docker 容器：
+  docker ps --filter publish=${app_port} --format 'table {{.Names}}\t{{.Ports}}'
+
+若该端口应由其他服务使用，请在 .env 中只修改 APP_PORT，例如：
+  APP_PORT=8081
+  LISTEN_ADDR=:8080
+
+APP_PORT 是宿主机访问端口；Compose 下 LISTEN_ADDR 必须保持容器内的 :8080。
+修改后重新运行：bash scripts/deploy.sh init
+EOF
+
+    published_containers="$(docker ps --filter "publish=${app_port}" --format '{{.Names}}: {{.Ports}}' 2>/dev/null || true)"
+    if [[ -n "${published_containers}" ]]; then
+        printf '\n当前 Docker 端口占用：\n%s\n' "${published_containers}" >&2
+    fi
+}
+
 wait_for_health() {
     local container_id state elapsed_seconds=0
     container_id="$(docker compose --env-file "${ENV_FILE}" ps -q "${SERVICE_NAME}")"
@@ -471,6 +495,7 @@ deploy_compose() {
     log "创建或更新 CertMate 服务。"
     if ! docker compose --env-file "${ENV_FILE}" up -d --force-recreate; then
         show_service_logs
+        show_compose_start_help
         die "Docker Compose 启动失败。"
     fi
     wait_for_health

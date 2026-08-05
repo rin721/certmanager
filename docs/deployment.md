@@ -191,6 +191,15 @@ Compose 推荐部署只维护仓库根目录的一份 `.env`：
 
 `.env.example` 包含其余字段及逐项中文注释。容器内 `DATA_DIR=/data` 和 `CERT_OUTPUT_DIR=/certs` 必须保持不变；自定义宿主机路径只修改 `*_HOST_DIR`。
 
+如果宿主机 `8080` 已被 Nginx、邮件服务或其他容器占用，只修改宿主机映射端口；不要修改容器监听端口。例如：
+
+```env
+APP_PORT=8081
+LISTEN_ADDR=:8080
+```
+
+此时访问地址为 `http://<服务器地址>:8081`，Compose 仍会把请求转发到容器内 `8080`。
+
 修改 `SESSION_SECRET` 会让已有登录会话失效。修改 `APP_ENCRYPTION_KEY` 可能导致数据库中已有 DNS 凭据无法解密，修改前必须备份数据。
 
 ### 4.1 使用只读 Secret 文件
@@ -308,5 +317,6 @@ docker compose start certmate
 - **提示目录权限不匹配**：检查脚本打印的路径后执行其 `sudo mkdir/chown/chmod` 命令，再重新运行。
 - **提示 bcrypt 必须加单引号**：把配置写成 `ADMIN_PASSWORD_HASH='$2y$...'`。
 - **登录后仍返回登录页**：生产 Secure Cookie 需要 HTTPS。本机隔离试用可临时设置 `SESSION_COOKIE_SECURE=false`。
+- **提示 `port is already allocated`**：宿主机 `APP_PORT` 已被占用。运行 `docker ps --filter publish=<端口>` 查看 Docker 占用者，或在 `.env` 中将 `APP_PORT` 改为未占用端口；`LISTEN_ADDR` 必须保持 `:8080`。修改后重新运行部署脚本，失败后处于 `Created` 状态的容器会被重新创建。
 - **更新被拒绝**：先查看 `git status` 并妥善处理 tracked 文件修改；脚本不会自动覆盖或清理它们。
 - **容器启动失败**：运行 `docker compose logs --tail=200 certmate`；不要把包含 Secret 的 `.env` 内容粘贴到公开问题中。

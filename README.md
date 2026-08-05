@@ -158,6 +158,7 @@ bash scripts/deploy.sh update
 
 - **第一次运行没有启动 Docker**：这是正常的配置阶段；编辑新生成的 `.env` 后再次运行 `bash scripts/deploy.sh init`。
 - **容器启动失败，提示密码/Secret 缺失**：确认管理员密码来源；两个内联 Secret 默认由部署脚本自动生成。
+- **Docker 提示 `port is already allocated`**：修改 `.env` 中的宿主机 `APP_PORT`，但保持容器 `LISTEN_ADDR=:8080`，然后重新运行 `bash scripts/deploy.sh init`。详细排查见 [Docker 部署手册](docs/deployment.md#10-常见问题)。
 - **能打开页面但登录后仍回到登录页**：生产 Secure Cookie 要求 HTTPS；本机使用 `localhost`，远程环境配置 TLS 反向代理。仅限隔离开发环境可显式设 `SESSION_COOKIE_SECURE=false`。
 - **挂载目录 permission denied**：把宿主机目录所有者改为 `APP_UID`/`APP_GID`（默认 10001），或按组织策略授予等效 ACL。
 - **HTTP-01 失败**：检查 DNS、80 端口、防火墙和 Nginx 挑战路径；不要把挑战请求重定向到登录页。
