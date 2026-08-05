@@ -1,4 +1,17 @@
 # syntax=docker/dockerfile:1.7
+FROM golang:1.25.12-alpine3.23 AS go-dependencies
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+FROM go-dependencies AS setup-helper-builder
+COPY cmd/setup-helper/ ./cmd/setup-helper/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/setup-helper ./cmd/setup-helper
+
+FROM scratch AS setup-helper
+COPY --from=setup-helper-builder /out/setup-helper /setup-helper
+ENTRYPOINT ["/setup-helper"]
+
 FROM node:24.11.1-alpine3.23 AS frontend-builder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
@@ -6,11 +19,8 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.25.12-alpine3.23 AS go-builder
+FROM go-dependencies AS go-builder
 ARG VERSION=dev
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
 COPY . .
 COPY --from=frontend-builder /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/certmate ./cmd/server

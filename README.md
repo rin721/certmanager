@@ -21,11 +21,11 @@ CertMate 不是企业 PKI、密钥托管服务或多租户证书平台。第一�
 
 公共 CA 证书由 Let’s Encrypt 等受信任 CA 签发，适合互联网网站、邮件和其他需要系统默认信任的服务；签发时必须证明域名控制权。CertMate 将协议处理交给固定版本的 acme.sh。
 
-自签名证书由本机 OpenSSL 生成，不受浏览器、Outlook、手机邮件客户端或操作系统默认信任，只适合内网、开发和测试。客户端必须自行导入信任，不能用它替代公共 CA 证书。
+自签名证书由容器内 OpenSSL 生成，不受浏览器、Outlook、手机邮件客户端或操作系统默认信任，只适合内网、开发和测试。客户端必须自行导入信任，不能用它替代公共 CA 证书。
 
 ## 5. Docker Compose 部署
 
-Linux 主机安装 Git、Bash、OpenSSL、Apache `htpasswd`、Docker Engine 和 Docker Compose v2 后，使用两阶段部署脚本：
+Linux 主机只需安装 Git、Bash、Docker Engine 和 Docker Compose v2，然后使用两阶段部署脚本：
 
 ```bash
 git clone <repo-addr> certmate

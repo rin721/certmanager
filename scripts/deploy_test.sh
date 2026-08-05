@@ -63,26 +63,19 @@ if [[ "${1:-}" == "inspect" ]]; then
     printf 'healthy\n'
 elif [[ "${1:-}" == "compose" && " $* " == *" ps -q certmate "* ]]; then
     printf 'mock-container-id\n'
+elif [[ " ${*} " == *" hash-password "* ]]; then
+    printf '%s\n' '$2y$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+elif [[ " ${*} " == *" random-secret "* ]]; then
+    count=0
+    [[ -f "${MOCK_RANDOM_COUNT}" ]] && count="$(<"${MOCK_RANDOM_COUNT}")"
+    count=$((count + 1))
+    printf '%s' "${count}" > "${MOCK_RANDOM_COUNT}"
+    if (( count % 2 == 1 )); then
+        printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    else
+        printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+    fi
 fi
-EOF
-    cat > "${mock_bin}/openssl" <<'EOF'
-#!/usr/bin/env bash
-printf 'openssl %s\n' "$*" >> "${MOCK_LOG}"
-count=0
-[[ -f "${MOCK_OPENSSL_COUNT}" ]] && count="$(<"${MOCK_OPENSSL_COUNT}")"
-count=$((count + 1))
-printf '%s' "${count}" > "${MOCK_OPENSSL_COUNT}"
-if (( count % 2 == 1 )); then
-    printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
-else
-    printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
-fi
-EOF
-    cat > "${mock_bin}/htpasswd" <<'EOF'
-#!/usr/bin/env bash
-printf 'htpasswd %s\n' "$*" >> "${MOCK_LOG}"
-username=${!#}
-printf '%s:%s\n' "${username}" '$2y$12$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 EOF
     cat > "${mock_bin}/git" <<'EOF'
 #!/usr/bin/env bash
@@ -95,7 +88,7 @@ elif [[ "${1:-}" == "pull" && "${MOCK_GIT_PULL_FAILURE:-}" == "1" ]]; then
     exit 1
 fi
 EOF
-    chmod +x "${mock_bin}/docker" "${mock_bin}/openssl" "${mock_bin}/htpasswd" "${mock_bin}/git"
+    chmod +x "${mock_bin}/docker" "${mock_bin}/git"
 }
 
 new_workspace() {
@@ -117,7 +110,7 @@ run_deploy() {
     fi
     PATH="${workspace}/mock-bin:${PATH}" \
         MOCK_LOG="${workspace}/mock.log" \
-        MOCK_OPENSSL_COUNT="${workspace}/openssl.count" \
+        MOCK_RANDOM_COUNT="${workspace}/random.count" \
         MOCK_PROJECT_ROOT="${workspace}" \
         MOCK_GIT_DIFF_FAILURE="${MOCK_GIT_DIFF_FAILURE:-}" \
         MOCK_GIT_PULL_FAILURE="${MOCK_GIT_PULL_FAILURE:-}" \
@@ -145,12 +138,11 @@ test_first_run_stops_after_copy() {
     [[ -z "$(env_value "${workspace}/.env" APP_ENCRYPTION_KEY)" ]] || fail "首次运行不应生成 APP_ENCRYPTION_KEY"
     assert_contains "${output_file}" "本次运行按设计停止"
     assert_not_contains "${workspace}/mock.log" "docker "
-    assert_not_contains "${workspace}/mock.log" "openssl "
     pass "首次运行只复制配置并停止"
 }
 
 test_second_run_generates_once_and_deploys() {
-    local workspace output_file session_secret encryption_key original_session original_encryption openssl_calls fake_hash
+    local workspace output_file session_secret encryption_key original_session original_encryption random_calls fake_hash
     workspace="$(new_workspace second-run)"
     output_file="${workspace}/output.log"
     run_deploy "${workspace}" "${output_file}" init
@@ -173,8 +165,8 @@ test_second_run_generates_once_and_deploys() {
     run_deploy "${workspace}" "${output_file}" init
     [[ "$(env_value "${workspace}/.env" SESSION_SECRET)" == "${original_session}" ]] || fail "重复运行改写了 SESSION_SECRET"
     [[ "$(env_value "${workspace}/.env" APP_ENCRYPTION_KEY)" == "${original_encryption}" ]] || fail "重复运行改写了 APP_ENCRYPTION_KEY"
-    openssl_calls="$(grep -c '^openssl ' "${workspace}/mock.log")"
-    [[ "${openssl_calls}" == "2" ]] || fail "重复运行不应再次调用 openssl"
+    random_calls="$(grep -c ' random-secret$' "${workspace}/mock.log")"
+    [[ "${random_calls}" == "2" ]] || fail "重复运行不应再次生成随机 Secret"
     pass "第二次运行生成 Secret、部署且保持幂等"
 }
 
@@ -189,7 +181,7 @@ test_secret_file_references_skip_generation() {
     set_env_value "${workspace}/.env" SESSION_SECRET_FILE /run/secrets/session_secret
     set_env_value "${workspace}/.env" APP_ENCRYPTION_KEY_FILE /run/secrets/app_encryption_key
     run_deploy "${workspace}" "${output_file}" init
-    assert_not_contains "${workspace}/mock.log" "openssl "
+    assert_not_contains "${workspace}/mock.log" " random-secret"
     pass "Secret 文件引用不会生成内联值"
 }
 
@@ -198,7 +190,7 @@ test_configure_admin_writes_bcrypt_only() {
     workspace="$(new_workspace configure-admin)"
     output_file="${workspace}/output.log"
     run_deploy "${workspace}" "${output_file}" init
-    if ! run_deploy "${workspace}" "${output_file}" configure-admin certadmin; then
+    if ! printf 'test-password\ntest-password\n' | run_deploy "${workspace}" "${output_file}" configure-admin certadmin; then
         sed 's/^/  /' "${output_file}" >&2
         fail "configure-admin 执行失败"
     fi
@@ -208,7 +200,8 @@ test_configure_admin_writes_bcrypt_only() {
     [[ -z "$(env_value "${workspace}/.env" ADMIN_PASSWORD)" ]] || fail "明文管理员密码不应写入 .env"
     [[ -z "$(env_value "${workspace}/.env" ADMIN_PASSWORD_FILE)" ]] || fail "旧密码文件来源应被清空"
     [[ -z "$(env_value "${workspace}/.env" ADMIN_PASSWORD_HASH_FILE)" ]] || fail "旧哈希文件来源应被清空"
-    assert_contains "${workspace}/mock.log" "htpasswd -nBC 12 certadmin"
+    assert_contains "${workspace}/mock.log" "docker build --target setup-helper --tag certmate-setup-helper:local"
+    assert_contains "${workspace}/mock.log" " hash-password"
     pass "交互配置只保存 bcrypt 哈希"
 }
 

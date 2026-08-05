@@ -10,10 +10,12 @@ readonly PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 readonly ENV_FILE="${PROJECT_ROOT}/.env"
 readonly ENV_EXAMPLE_FILE="${PROJECT_ROOT}/.env.example"
 readonly SERVICE_NAME="certmate"
+readonly SETUP_HELPER_IMAGE="certmate-setup-helper:local"
 readonly HEALTH_TIMEOUT_SECONDS=120
 readonly HEALTH_POLL_SECONDS=2
 
 ENV_TEMP_FILE=""
+SETUP_HELPER_READY=false
 declare -A ENV_VALUES=()
 declare -A ENV_RAW_VALUES=()
 declare -A ENV_KEY_LINES=()
@@ -195,8 +197,7 @@ write_admin_credentials() {
 }
 
 configure_admin_credentials() {
-    local requested_username=${1:-} username password_output password_hash
-    require_command htpasswd
+    local requested_username=${1:-} username password password_confirmation password_hash
 
     if [[ -n "${requested_username}" ]]; then
         username=${requested_username}
@@ -207,10 +208,34 @@ configure_admin_credentials() {
     fi
     [[ "${username}" =~ ^[A-Za-z0-9._@-]{1,64}$ ]] || die "管理员用户名只能包含字母、数字、点、下划线、@ 和连字符，长度为 1-64。"
 
-    printf '请按 htpasswd 提示输入并再次确认管理员密码；输入内容不会显示。\n'
-    password_output="$(htpasswd -nBC 12 "${username}")" || die "管理员密码哈希生成失败。"
-    password_hash=${password_output#*:}
-    [[ "${password_output}" == "${username}:"* && "${password_hash}" =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || die "htpasswd 未返回有效的 bcrypt 哈希。"
+    build_setup_helper
+    [[ "${-}" != *x* ]] || set +x
+    printf '管理员密码（输入内容不会显示）：' >&2
+    if ! IFS= read -r -s password; then
+        printf '\n' >&2
+        die "读取管理员密码失败。"
+    fi
+    printf '\n再次输入管理员密码：' >&2
+    if ! IFS= read -r -s password_confirmation; then
+        unset password
+        printf '\n' >&2
+        die "读取确认密码失败。"
+    fi
+    printf '\n' >&2
+    if [[ -z "${password}" ]]; then
+        unset password password_confirmation
+        die "管理员密码不能为空。"
+    fi
+    if [[ "${password}" != "${password_confirmation}" ]]; then
+        unset password password_confirmation
+        die "两次输入的管理员密码不一致。"
+    fi
+    if ! password_hash="$(printf '%s\n' "${password}" | run_setup_helper hash-password)"; then
+        unset password password_confirmation
+        die "管理员密码哈希生成失败。"
+    fi
+    unset password password_confirmation
+    [[ "${password_hash}" =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] || die "Docker 初始化工具未返回有效的 bcrypt 哈希。"
 
     write_admin_credentials "${username}" "${password_hash}"
     log "已保存管理员 ${username} 的 bcrypt 哈希，并清空其他管理员密码来源。"
@@ -228,11 +253,26 @@ ensure_admin_config() {
     configure_admin_credentials
 }
 
+build_setup_helper() {
+    if [[ "${SETUP_HELPER_READY}" == true ]]; then
+        return
+    fi
+    require_command docker
+    log "构建一次性 Docker 初始化工具（宿主机无需安装 Apache 或 OpenSSL）。"
+    docker build --target setup-helper --tag "${SETUP_HELPER_IMAGE}" "${PROJECT_ROOT}" || die "构建 Docker 初始化工具失败。"
+    SETUP_HELPER_READY=true
+}
+
+run_setup_helper() {
+    local operation=$1
+    build_setup_helper
+    docker run --rm -i --network none --read-only --security-opt no-new-privileges:true --cap-drop ALL "${SETUP_HELPER_IMAGE}" "${operation}"
+}
+
 generate_secret() {
     local secret
-    require_command openssl
-    secret="$(openssl rand -hex 32)" || die "生成随机 Secret 失败。"
-    [[ "${secret}" =~ ^[0-9a-f]{64}$ ]] || die "openssl 未返回预期的 32 字节随机值。"
+    secret="$(run_setup_helper random-secret)" || die "生成随机 Secret 失败。"
+    [[ "${secret}" =~ ^[0-9a-f]{64}$ ]] || die "Docker 初始化工具未返回预期的 32 字节随机值。"
     printf '%s' "${secret}"
 }
 
@@ -244,6 +284,7 @@ ensure_secret() {
         return
     fi
 
+    build_setup_helper
     generated_secret="$(generate_secret)"
     if [[ "${value_key}" == "APP_ENCRYPTION_KEY" && "${generated_secret}" == "$(env_value SESSION_SECRET)" ]]; then
         generated_secret="$(generate_secret)"
@@ -364,14 +405,17 @@ prepare_host_directories() {
 }
 
 validate_runtime_config() {
-    local app_port session_secret encryption_key
+    local app_port
     validate_sensitive_quoting
     app_port="$(env_value APP_PORT 8080)"
     validate_integer_range APP_PORT "${app_port}" 1 65535
 
     [[ "$(env_value DATA_DIR /data)" == "/data" ]] || die "Compose 部署时 DATA_DIR 必须保持 /data。"
     [[ "$(env_value CERT_OUTPUT_DIR /certs)" == "/certs" ]] || die "Compose 部署时 CERT_OUTPUT_DIR 必须保持 /certs。"
+}
 
+validate_secret_config() {
+    local session_secret encryption_key
     session_secret="$(env_value SESSION_SECRET)"
     if [[ -z "$(env_value SESSION_SECRET_FILE)" && ${#session_secret} -lt 32 ]]; then
         die "SESSION_SECRET 至少需要 32 字节。"
@@ -470,10 +514,11 @@ EOF
     ensure_admin_config
     validate_sensitive_quoting
     validate_admin_config
-    ensure_secret SESSION_SECRET SESSION_SECRET_FILE
-    ensure_secret APP_ENCRYPTION_KEY APP_ENCRYPTION_KEY_FILE
     validate_runtime_config
     prepare_host_directories
+    ensure_secret SESSION_SECRET SESSION_SECRET_FILE
+    ensure_secret APP_ENCRYPTION_KEY APP_ENCRYPTION_KEY_FILE
+    validate_secret_config
     deploy_compose
 }
 

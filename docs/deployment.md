@@ -9,25 +9,10 @@
 - Linux；
 - Git；
 - Bash；
-- OpenSSL；
-- Apache `htpasswd`（Debian/Ubuntu 的 `apache2-utils`、RHEL 系的 `httpd-tools`、Alpine 的 `apache2-utils`）；
 - Docker Engine；
 - Docker Compose v2，即 `docker compose` 命令。
 
-CertMate 只需要一个应用容器，不使用 Docker Socket。SQLite、acme.sh 状态和证书分别持久化到宿主机目录。
-
-常见发行版安装 `htpasswd`：
-
-```bash
-# Debian / Ubuntu
-sudo apt-get install apache2-utils
-
-# RHEL / Rocky / AlmaLinux
-sudo dnf install httpd-tools
-
-# Alpine
-sudo apk add apache2-utils
-```
+CertMate 只运行一个常驻应用容器，不使用 Docker Socket。bcrypt、随机 Secret 和证书所需工具都在项目自己的 Docker 镜像中，宿主机不需要安装 Apache、`htpasswd`、OpenSSL、Go 或 Node.js。SQLite、acme.sh 状态和证书分别持久化到宿主机目录。
 
 ## 2. 首次部署
 
@@ -53,13 +38,13 @@ bash scripts/deploy.sh init
 3. 显示必须配置的字段；
 4. 以成功状态停止，不生成 Secret，也不调用 Docker。
 
-先通过脚本配置管理员账户。脚本会先询问用户名，再由 `htpasswd` 隐藏输入密码并要求确认两次；密码不会进入 Shell 历史：
+先通过脚本配置管理员账户。脚本会询问用户名，并隐藏输入、确认两次密码；密码不会进入 Shell 历史：
 
 ```bash
 bash scripts/deploy.sh configure-admin
 ```
 
-脚本最终只把单引号保护的 bcrypt 哈希写入 `ADMIN_PASSWORD_HASH`，并清空其他管理员密码来源，不会把明文密码写入 `.env`、命令行或日志。
+脚本会构建项目内的最小一次性 helper 镜像，通过 stdin 将密码交给无网络、只读、无 Linux capabilities 的临时容器生成 bcrypt。最终只把单引号保护的哈希写入 `ADMIN_PASSWORD_HASH`，并清空其他管理员密码来源；明文密码不会写入 `.env`、命令行或日志。
 
 然后编辑其余配置：
 
@@ -126,7 +111,7 @@ bash scripts/deploy.sh init
 
 1. 安全读取 `.env`，不通过 `source` 执行其中的内容；
 2. 检查重复配置键、管理员账户、端口、UID/GID 和宿主机路径；
-3. 使用 `openssl rand -hex 32` 生成不同的 `SESSION_SECRET` 和 `APP_ENCRYPTION_KEY`；
+3. 使用一次性 Docker helper 中的 Go `crypto/rand` 生成不同的 `SESSION_SECRET` 和 `APP_ENCRYPTION_KEY`；
 4. 原子写回 `.env`，不在终端显示 Secret；
 5. 创建并验证宿主机持久化目录；
 6. 执行 Compose 配置校验、镜像构建和容器更新；
