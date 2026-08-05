@@ -107,6 +107,61 @@ docker compose logs -f certmate
 
 容器使用只读根文件系统、非 root 用户、`cap_drop: ALL`、`no-new-privileges` 和独立 `/tmp` tmpfs；只允许 `/data`、`/certs` 与 tmpfs 写入，未挂载 Docker Socket。
 
+### 9.1 Git、Docker Build 与 Docker Run 部署方式
+
+CertMate 的配置分为构建期、容器启动期和应用运行期三类。构建期只用于镜像版本和固定的 acme.sh 版本，不要把密码、Token 或加密密钥写入 Dockerfile 或 `--build-arg`。
+
+从 Git 工作树直接构建并使用 `docker run` 时，可以把运行配置放在未提交的 `production.env` 中：
+
+```bash
+git clone <repo-addr>
+cd certmanager
+cp .env.example production.env
+# 编辑 production.env，至少填写管理员密码/哈希、SESSION_SECRET 和 APP_ENCRYPTION_KEY
+
+docker build \
+  --build-arg VERSION=local \
+  -t certmate:local .
+
+mkdir -p ./data ./certs
+docker run -d \
+  --name certmate \
+  --restart unless-stopped \
+  --user 10001:10001 \
+  --env-file ./production.env \
+  -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -v "$(pwd)/certs:/certs" \
+  --read-only \
+  --tmpfs /tmp:size=64m,mode=1770,uid=10001,gid=10001 \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL \
+  certmate:local
+```
+
+直接 `docker run` 不会自动继承 Compose 的安全参数、目录挂载或健康检查；生产部署应完整保留上面的 `--user`、`--read-only`、`--tmpfs`、`--cap-drop` 和两个持久化目录参数。宿主机端口可以改为 `-p 18080:8080`，容器内端口仍保持 `8080`。
+
+使用 Compose 更新代码时，`build --pull` 只更新镜像，不会自动替换正在运行的旧容器。推荐流程是：
+
+```bash
+git pull --ff-only
+docker compose config
+docker compose build --pull
+docker compose up -d --force-recreate
+docker compose ps
+curl http://localhost:8080/readyz
+```
+
+当前 `compose.yaml` 的服务配置固定引用 `.env`。`docker compose --env-file other.env` 只会改变 Compose 插值来源，不会自动替换服务的 `env_file: .env`。如需使用另一套配置，先复制为 `.env`，再执行 `docker compose up -d --force-recreate`；不要把生产 Secret 提交到 Git。
+
+### 9.2 配置何时生效
+
+容器启动时读取的环境变量包括端口、目录、管理员账户、Session/加密密钥、是否启用 ACME、可信代理、日志级别以及 OpenSSL/acme.sh 路径。修改这些值后必须重新创建容器；单独执行 `docker compose restart` 通常不会更新容器环境。
+
+管理后台可以在不重启容器的情况下修改续签 Cron、时区、并发、重试策略、证书续签选项和 DNS 凭据。运行中的策略保存后会热更新调度器。
+
+修改 `SESSION_SECRET` 会使已有登录会话失效；修改 `APP_ENCRYPTION_KEY` 可能导致已保存的 DNS 凭据无法解密，操作前必须备份 `/data`。修改 `DATA_HOST_DIR` 或 `CERTS_HOST_DIR` 时，还要同步确认宿主机目录存在且 UID/GID 10001 可读写。
+
 ## 10. 登录管理后台
 
 从本机访问 `http://localhost:${APP_PORT:-8080}`，使用 `.env` 中的管理员账户登录。生产环境应由 HTTPS 反向代理访问并保持 `SESSION_COOKIE_SECURE=true`。

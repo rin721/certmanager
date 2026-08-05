@@ -18,6 +18,12 @@
 - 管理端口不得直连公网；HTTP-01 只转发 `/.well-known/acme-challenge/`。
 - 定期备份 SQLite、acme.sh 状态和证书目录，并演练恢复。
 
+## Docker 配置边界
+
+Dockerfile 的 `VERSION`、`ACME_SH_VERSION` 和校验值属于构建期参数，不得用于传递密码、Token、Session Secret 或应用加密密钥。运行时配置应通过受保护的 `--env-file`、Compose `.env` 或 `*_FILE` Secret 文件注入。
+
+修改端口、目录、管理员账户、Session/加密密钥、可信代理和功能开关后，必须重新创建容器；仅重启进程不会可靠地替换容器环境。修改 `APP_ENCRYPTION_KEY` 前必须备份 `/data`，因为旧 DNS 凭据可能无法再解密。
+
 ## Secret 与日志
 
 CertMate 不把管理员密码写入数据库，不把证书私钥正文存入 SQLite。DNS Secret 使用应用主密钥进行 AES-GCM 加密或仅保存环境变量引用。日志、任务输出和审计记录不得包含密码、Token、Cookie、DNS Secret 或私钥；发生疑似泄漏时应立即轮换相关 Secret 和证书。
