@@ -44,7 +44,7 @@ bash scripts/deploy.sh init
 bash scripts/deploy.sh configure-admin
 ```
 
-脚本会构建项目内的最小一次性 helper 镜像，通过 stdin 将密码交给无网络、只读、无 Linux capabilities 的临时容器生成 bcrypt。最终只把单引号保护的哈希写入 `ADMIN_PASSWORD_HASH`，并清空其他管理员密码来源；明文密码不会写入 `.env`、命令行或日志。
+脚本会构建项目内的最小 helper 镜像，通过 stdin 将密码交给无网络、只读、无 Linux capabilities 的临时容器生成 bcrypt。临时容器带有 `--rm`，完成后会自动删除，因此不会出现在随后执行的 `docker ps` 中。最终只把单引号保护的哈希写入 `ADMIN_PASSWORD_HASH`，并清空其他管理员密码来源；明文密码不会写入 `.env`、命令行或日志。
 
 然后编辑其余配置：
 

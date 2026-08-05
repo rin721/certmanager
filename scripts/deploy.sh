@@ -545,6 +545,16 @@ configure_admin() {
     parse_env_file
     validate_sensitive_quoting
     configure_admin_credentials "${1:-}"
+    cat <<'EOF'
+
+密码哈希使用的 helper 是一次性容器，已通过 --rm 自动删除；这是正常行为。
+请确认 .env 中的 DATA_HOST_DIR、CERTS_HOST_DIR 和 APP_PORT，然后启动常驻服务：
+  bash scripts/deploy.sh init
+
+启动后查看：
+  docker compose ps
+  docker compose logs --tail=100 certmate
+EOF
 }
 
 main() {
