@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM golang:1.25.12-alpine3.23 AS go-dependencies
+FROM golang:1.26.6-alpine3.23 AS go-dependencies
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
