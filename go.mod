@@ -3,7 +3,7 @@ module github.com/rin721/certmate
 go 1.25.12
 
 require (
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/gorilla/csrf v1.7.3
 	github.com/gorilla/sessions v1.4.0
 	github.com/pressly/goose/v3 v3.27.3
